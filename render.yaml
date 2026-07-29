@@ -2,7 +2,7 @@ services:
   - type: web
     name: tercer-tiempo
     env: python
-    plan: free
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
@@ -10,3 +10,7 @@ services:
         generateValue: true
       - key: PYTHON_VERSION
         value: 3.11.9
+    disk:
+      name: tercer-tiempo-data
+      mountPath: /opt/render/project/src/instance
+      sizeGB: 1
