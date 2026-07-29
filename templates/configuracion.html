@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Configuración · Tercer Tiempo{% endblock %}
+{% block content %}
+<h1 class="titulo-pagina">Configuración</h1>
+
+<h2 class="titulo-seccion">Precios por hora</h2>
+<form method="post" action="{{ url_for('configuracion.actualizar_precios') }}" class="formulario formulario-tarjeta">
+  {% for tipo in tipos_espacio %}
+  <label for="precio_{{ tipo }}">
+    {{ {"futsal": "Futsal / Fútbol", "voley": "Vóley", "billar": "Billar", "otro": "Otros juegos"}[tipo] }} (₲ por hora)
+  </label>
+  <input type="text" inputmode="numeric" id="precio_{{ tipo }}" name="precio_{{ tipo }}"
+         value="{{ precios[tipo].precio_hora if tipo in precios else 0 }}">
+  {% endfor %}
+  <button type="submit" class="btn btn-primario btn-grande">Guardar precios</button>
+</form>
+
+<h2 class="titulo-seccion">Usuarios</h2>
+<a href="{{ url_for('configuracion.usuarios') }}" class="btn btn-secundario">Gestionar usuarios →</a>
+{% endblock %}

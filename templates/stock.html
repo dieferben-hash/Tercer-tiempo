@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Stock · Tercer Tiempo{% endblock %}
+{% block content %}
+<div class="cabecera-con-boton">
+  <h1 class="titulo-pagina">Stock / Inventario</h1>
+  {% if current_user.es_admin %}
+  <div class="botones-cabecera">
+    <a href="{{ url_for('stock.movimientos') }}" class="btn btn-secundario">Movimientos</a>
+    <a href="{{ url_for('stock.nuevo') }}" class="btn btn-primario">+ Nuevo producto</a>
+  </div>
+  {% endif %}
+</div>
+
+<div class="tabla-envoltorio">
+<table class="tabla">
+  <thead>
+    <tr>
+      <th>Producto</th>
+      <th>Categoría</th>
+      <th>Precio venta</th>
+      <th>Stock</th>
+      <th>Mínimo</th>
+      {% if current_user.es_admin %}<th>Acciones</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for producto in productos %}
+    <tr class="{{ 'fila-alerta' if producto.stock_bajo else '' }}">
+      <td>{{ producto.nombre }}</td>
+      <td>{{ producto.etiqueta_categoria }}</td>
+      <td>{{ producto.precio_venta|gs }}</td>
+      <td>{{ producto.stock }}{% if producto.stock_bajo %} ⚠️{% endif %}</td>
+      <td>{{ producto.stock_minimo }}</td>
+      {% if current_user.es_admin %}
+      <td class="acciones-tabla">
+        <form method="post" action="{{ url_for('stock.reponer', producto_id=producto.id) }}" class="form-inline">
+          <input type="number" name="cantidad" min="1" placeholder="Cant." class="input-chico" required>
+          <button type="submit" class="btn btn-chico btn-secundario">Reponer</button>
+        </form>
+        <a href="{{ url_for('stock.editar', producto_id=producto.id) }}" class="btn btn-chico btn-secundario">Editar</a>
+        <form method="post" action="{{ url_for('stock.eliminar', producto_id=producto.id) }}" onsubmit="return confirm('¿Eliminar {{ producto.nombre }}?');" class="form-inline">
+          <button type="submit" class="btn btn-chico btn-peligro">Eliminar</button>
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="tabla-vacia">No hay productos cargados.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

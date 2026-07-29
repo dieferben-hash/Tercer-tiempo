@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Iniciar sesión · Tercer Tiempo{% endblock %}
+{% block content_publico %}
+<div class="login-envoltorio">
+  <div class="login-card">
+    <div class="login-logo">
+      <span class="logo-icono">🏟️</span>
+      <h1>Tercer Tiempo</h1>
+      <p>Gestión de canchas, juegos y kiosco</p>
+    </div>
+    <form method="post" class="login-form">
+      <label for="usuario">Usuario</label>
+      <input type="text" id="usuario" name="usuario" autocomplete="username" autofocus required>
+
+      <label for="password">Contraseña</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+
+      <button type="submit" class="btn btn-primario btn-grande">Ingresar</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

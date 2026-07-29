@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Usuarios · Tercer Tiempo{% endblock %}
+{% block content %}
+<div class="cabecera-con-boton">
+  <h1 class="titulo-pagina">Usuarios</h1>
+  <a href="{{ url_for('configuracion.usuario_nuevo') }}" class="btn btn-primario">+ Nuevo usuario</a>
+</div>
+
+<div class="tabla-envoltorio">
+<table class="tabla">
+  <thead><tr><th>Nombre</th><th>Usuario</th><th>Rol</th><th>Estado</th><th></th></tr></thead>
+  <tbody>
+    {% for u in usuarios %}
+    <tr>
+      <td>{{ u.nombre }}</td>
+      <td>{{ u.usuario }}</td>
+      <td>{{ "Administrador" if u.rol == "administrador" else "Cajero" }}</td>
+      <td><span class="etiqueta {{ 'etiqueta-verde' if u.activo else 'etiqueta-gris' }}">{{ "Activo" if u.activo else "Inactivo" }}</span></td>
+      <td><a href="{{ url_for('configuracion.usuario_editar', usuario_id=u.id) }}" class="btn btn-chico btn-secundario">Editar</a></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<a href="{{ url_for('configuracion.inicio') }}" class="link-secundario">← Volver a configuración</a>
+{% endblock %}

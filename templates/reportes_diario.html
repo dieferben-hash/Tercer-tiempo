@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Reporte diario · Tercer Tiempo{% endblock %}
+{% block content %}
+<h1 class="titulo-pagina">Reporte diario</h1>
+
+<form method="get" class="formulario-filtro">
+  <label for="fecha">Fecha</label>
+  <input type="date" id="fecha" name="fecha" value="{{ fecha.isoformat() }}" onchange="this.form.submit()">
+  <a href="{{ url_for('reportes.rango') }}" class="link-secundario">Ver reporte por rango de fechas →</a>
+</form>
+
+<div class="botones-cabecera no-imprimir">
+  <a href="{{ url_for('reportes.exportar', fecha=fecha.isoformat()) }}" class="btn btn-secundario">⬇ Exportar CSV</a>
+  <button onclick="window.print()" class="btn btn-secundario">🖨 Imprimir</button>
+</div>
+
+<section class="tarjetas-resumen">
+  <div class="tarjeta tarjeta-verde">
+    <span class="tarjeta-etiqueta">Total general</span>
+    <span class="tarjeta-monto">{{ total_general|gs }}</span>
+  </div>
+  <div class="tarjeta">
+    <span class="tarjeta-etiqueta">Alquileres</span>
+    <span class="tarjeta-monto">{{ total_alquileres|gs }}</span>
+  </div>
+  <div class="tarjeta">
+    <span class="tarjeta-etiqueta">Kiosco</span>
+    <span class="tarjeta-monto">{{ total_kiosco|gs }}</span>
+  </div>
+</section>
+
+<h2 class="titulo-seccion">Alquileres por tipo de espacio</h2>
+<div class="tabla-envoltorio">
+<table class="tabla">
+  <thead><tr><th>Tipo</th><th>Cantidad</th><th>Total</th></tr></thead>
+  <tbody>
+    {% for tipo, cantidad, total in alquileres_por_tipo %}
+    <tr><td>{{ etiquetas_espacio.get(tipo, tipo) }}</td><td>{{ cantidad }}</td><td>{{ total|gs }}</td></tr>
+    {% else %}
+    <tr><td colspan="3" class="tabla-vacia">Sin alquileres en esta fecha.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2 class="titulo-seccion">Productos más vendidos</h2>
+<div class="tabla-envoltorio">
+<table class="tabla">
+  <thead><tr><th>Producto</th><th>Cantidad</th><th>Total</th></tr></thead>
+  <tbody>
+    {% for nombre, cantidad, total in productos_top %}
+    <tr><td>{{ nombre }}</td><td>{{ cantidad }}</td><td>{{ total|gs }}</td></tr>
+    {% else %}
+    <tr><td colspan="3" class="tabla-vacia">Sin ventas de kiosco en esta fecha.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2 class="titulo-seccion">Cierre de caja</h2>
+{% if caja and caja.estado == "cerrada" %}
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Monto inicial</span><strong>{{ caja.monto_inicial|gs }}</strong></div>
+  <div class="resumen-fila"><span>Total general</span><strong>{{ (caja.total_general or 0)|gs }}</strong></div>
+  <div class="resumen-fila"><span>Monto esperado</span><strong>{{ (caja.monto_esperado or 0)|gs }}</strong></div>
+  <div class="resumen-fila"><span>Monto contado</span><strong>{{ (caja.monto_contado or 0)|gs }}</strong></div>
+  <div class="resumen-fila resumen-total"><span>Diferencia</span><strong>{{ (caja.diferencia or 0)|gs }}</strong></div>
+</div>
+{% else %}
+<p class="ayuda-texto">La caja de este día todavía no fue cerrada.</p>
+{% endif %}
+{% endblock %}

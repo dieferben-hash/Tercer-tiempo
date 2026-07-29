@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Movimientos de stock · Tercer Tiempo{% endblock %}
+{% block content %}
+<h1 class="titulo-pagina">Movimientos de stock</h1>
+
+<div class="tabla-envoltorio">
+<table class="tabla">
+  <thead>
+    <tr>
+      <th>Fecha</th>
+      <th>Producto</th>
+      <th>Tipo</th>
+      <th>Cantidad</th>
+      <th>Motivo</th>
+      <th>Usuario</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for m in movimientos %}
+    <tr>
+      <td>{{ m.fecha.strftime("%d/%m/%Y %H:%M") }}</td>
+      <td>{{ m.producto.nombre }}</td>
+      <td><span class="etiqueta {{ 'etiqueta-verde' if m.tipo == 'entrada' else 'etiqueta-naranja' }}">{{ "Entrada" if m.tipo == "entrada" else "Salida" }}</span></td>
+      <td>{{ m.cantidad }}</td>
+      <td>{{ m.motivo or "-" }}</td>
+      <td>{{ m.usuario.nombre if m.usuario else "-" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="tabla-vacia">No hay movimientos registrados.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}
