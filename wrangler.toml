@@ -1,0 +1,14 @@
+name = "tercer-tiempo"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+# Variable de entorno: clave para firmar las cookies de sesion.
+# Cambiala por una cadena larga y aleatoria desde el panel de Cloudflare.
+[vars]
+SECRET_KEY = "cambiar-esta-clave-por-una-larga-y-secreta"
+
+# Base de datos D1. El database_id se completa despues de crearla.
+[[d1_databases]]
+binding = "DB"
+database_name = "tercer-tiempo-db"
+database_id = "PEGAR_AQUI_EL_DATABASE_ID"
