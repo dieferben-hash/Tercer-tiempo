@@ -90,7 +90,10 @@ CREATE TABLE IF NOT EXISTS alquileres (
   unidad TEXT DEFAULT 'hora',
   precio_hora INTEGER NOT NULL DEFAULT 0,
   total INTEGER NOT NULL DEFAULT 0,
-  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
+  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',  -- efectivo | transferencia | tarjeta | mixto
+  pago_efectivo INTEGER DEFAULT 0,
+  pago_transferencia INTEGER DEFAULT 0,
+  pago_tarjeta INTEGER DEFAULT 0,
   usuario_id INTEGER REFERENCES usuarios(id),
   fecha_registro TEXT DEFAULT (datetime('now'))
 );
@@ -100,7 +103,10 @@ CREATE TABLE IF NOT EXISTS ventas (
   caja_id INTEGER NOT NULL REFERENCES cajas(id),
   fecha TEXT DEFAULT (datetime('now')),
   total INTEGER NOT NULL DEFAULT 0,
-  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
+  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',  -- efectivo | transferencia | tarjeta | mixto
+  pago_efectivo INTEGER DEFAULT 0,
+  pago_transferencia INTEGER DEFAULT 0,
+  pago_tarjeta INTEGER DEFAULT 0,
   usuario_id INTEGER REFERENCES usuarios(id)
 );
 

@@ -17,7 +17,11 @@ const UNIDAD_DEFECTO = { futsal: 'hora', voley: 'juego', billar: 'ficha', otro: 
 const CATEGORIAS_PRODUCTO = ['bebida_sin_alcohol', 'bebida_alcoholica', 'comida_rapida', 'otro'];
 const ETIQUETAS_CATEGORIA = { bebida_sin_alcohol: 'Bebida sin alcohol', bebida_alcoholica: 'Bebida alcohólica', comida_rapida: 'Comida rápida', otro: 'Otro' };
 const METODOS_PAGO = ['efectivo', 'transferencia', 'tarjeta'];
-const ETIQUETAS_PAGO = { efectivo: 'Efectivo', transferencia: 'Transferencia', tarjeta: 'Tarjeta' };
+// 'mixto' no es una caja de dinero: es un cobro repartido entre las tres de arriba
+// La tarjeta no se usa en el complejo: queda la columna en la base, pero no se ofrece.
+// Para volver a habilitarla basta con agregar 'tarjeta' de nuevo a esta lista.
+const METODOS_FORM = ['efectivo', 'transferencia', 'mixto'];
+const ETIQUETAS_PAGO = { efectivo: 'Efectivo', transferencia: 'Transferencia', tarjeta: 'Tarjeta', mixto: 'Mixto' };
 
 const TZ = 'America/Asuncion';
 
@@ -154,26 +158,90 @@ async function totalesRango(env, fi, ff) {
 // ---- Arqueo de caja: los totales se calculan POR CAJA (no por dia) ----
 const COSTO_SQL = 'COALESCE(NULLIF(vd.costo_unitario,0), p.precio_costo, 0)';
 
+// Reparto del cobro por caja de dinero. Si las columnas nuevas estan en cero
+// (filas viejas), cae al metodo_pago de la fila para no perder plata en el arqueo.
+const SQL_REPARTO = `
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_efectivo,0)
+    WHEN metodo_pago='efectivo' THEN total ELSE 0 END),0) AS efectivo,
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_transferencia,0)
+    WHEN metodo_pago='transferencia' THEN total ELSE 0 END),0) AS transferencia,
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_tarjeta,0)
+    WHEN metodo_pago='tarjeta' THEN total ELSE 0 END),0) AS tarjeta,
+  COALESCE(SUM(total),0) AS t, COUNT(id) AS n`;
+
+// Toma lo que vino del formulario y devuelve como se reparte el cobro.
+// Devuelve { error } si el reparto mixto no cuadra con el total.
+function repartoPago(b, total) {
+  const num = (v) => {
+    const n = parseInt(String(v == null ? '0' : v).replace(/[^0-9]/g, ''), 10);
+    return Number.isNaN(n) ? 0 : n;
+  };
+  let metodo = String(b.metodo_pago || 'efectivo');
+  if (!METODOS_FORM.includes(metodo)) metodo = 'efectivo';
+
+  if (metodo !== 'mixto') {
+    const r = { metodo, efectivo: 0, transferencia: 0, tarjeta: 0 };
+    r[metodo] = total;
+    return r;
+  }
+
+  const efectivo = num(b.pago_efectivo);
+  const transferencia = num(b.pago_transferencia);
+  const tarjeta = num(b.pago_tarjeta);
+  const suma = efectivo + transferencia + tarjeta;
+  if (suma !== total) {
+    const dif = total - suma;
+    return { error: 'El pago mixto no cuadra: el total es ' + gs(total) + ' y repartiste ' + gs(suma) + '. '
+      + (dif > 0 ? 'Falta ' + gs(dif) + '.' : 'Te pasaste por ' + gs(-dif) + '.') };
+  }
+  // Si al final cargo una sola forma de pago, se guarda como pago simple
+  const usadas = METODOS_PAGO.filter((m) => ({ efectivo, transferencia, tarjeta })[m] > 0);
+  if (usadas.length === 1) return { metodo: usadas[0], efectivo, transferencia, tarjeta };
+  return { metodo: 'mixto', efectivo, transferencia, tarjeta };
+}
+
+// Celda "Pago" de las tablas: los mixtos muestran el desglose
+function fmtPago(r) {
+  if (r.metodo_pago !== 'mixto') return esc(ETIQUETAS_PAGO[r.metodo_pago] || r.metodo_pago);
+  const partes = [];
+  if (r.pago_efectivo > 0) partes.push('efvo. ' + gs(r.pago_efectivo));
+  if (r.pago_transferencia > 0) partes.push('transf. ' + gs(r.pago_transferencia));
+  if (r.pago_tarjeta > 0) partes.push('tarj. ' + gs(r.pago_tarjeta));
+  return 'Mixto' + (partes.length ? ' <small class="texto-suave">(' + esc(partes.join(' · ')) + ')</small>' : '');
+}
+
+// Bloque de montos que aparece al elegir "Mixto"
+const BLOQUE_MIXTO = `
+<div id="bloque-mixto" class="panel-mixto" style="display:none">
+  <div class="formulario-fila">
+    <div><label for="pago_efectivo">Efectivo</label>
+      <input type="number" class="mixto-input" id="pago_efectivo" name="pago_efectivo" min="0" step="1000" value="0"></div>
+    <div><label for="pago_transferencia">Transferencia</label>
+      <input type="number" class="mixto-input" id="pago_transferencia" name="pago_transferencia" min="0" step="1000" value="0"></div>
+  </div>
+  <p class="ayuda-texto" id="mixto-aviso"></p>
+</div>`;
+
 async function resumenCaja(env, cajaId) {
-  const alqRows = await all(env, 'SELECT metodo_pago, COALESCE(SUM(total),0) AS t, COUNT(id) AS n FROM alquileres WHERE caja_id=? GROUP BY metodo_pago', cajaId);
-  const venRows = await all(env, 'SELECT metodo_pago, COALESCE(SUM(total),0) AS t, COUNT(id) AS n FROM ventas WHERE caja_id=? GROUP BY metodo_pago', cajaId);
+  const alqR = await first(env, 'SELECT ' + SQL_REPARTO + ' FROM alquileres WHERE caja_id=?', cajaId);
+  const venR = await first(env, 'SELECT ' + SQL_REPARTO + ' FROM ventas WHERE caja_id=?', cajaId);
   const movRows = await all(env, 'SELECT tipo, COALESCE(SUM(monto),0) AS t FROM movimientos_caja WHERE caja_id=? GROUP BY tipo', cajaId);
   const cmv = await first(env,
     `SELECT COALESCE(SUM(${COSTO_SQL} * vd.cantidad),0) AS t
      FROM venta_detalles vd JOIN ventas v ON vd.venta_id=v.id JOIN productos p ON vd.producto_id=p.id
      WHERE v.caja_id=?`, cajaId);
 
-  const cero = () => ({ efectivo: 0, transferencia: 0, tarjeta: 0 });
-  const alq = cero(), kio = cero();
-  let alqTotal = 0, kioTotal = 0, alqCant = 0, kioCant = 0;
-  for (const r of alqRows) {
-    const m = METODOS_PAGO.includes(r.metodo_pago) ? r.metodo_pago : 'efectivo';
-    alq[m] += r.t; alqTotal += r.t; alqCant += r.n;
-  }
-  for (const r of venRows) {
-    const m = METODOS_PAGO.includes(r.metodo_pago) ? r.metodo_pago : 'efectivo';
-    kio[m] += r.t; kioTotal += r.t; kioCant += r.n;
-  }
+  const reparto = (row) => ({
+    efectivo: row ? row.efectivo : 0,
+    transferencia: row ? row.transferencia : 0,
+    tarjeta: row ? row.tarjeta : 0,
+  });
+  const alq = reparto(alqR), kio = reparto(venR);
+  const alqTotal = alqR ? alqR.t : 0, kioTotal = venR ? venR.t : 0;
+  const alqCant = alqR ? alqR.n : 0, kioCant = venR ? venR.n : 0;
   let egresos = 0, ingresos = 0;
   for (const r of movRows) { if (r.tipo === 'egreso') egresos += r.t; else ingresos += r.t; }
   const porMetodo = {
@@ -461,12 +529,12 @@ function bloqueArqueo(caja, r, { titulo = 'Arqueo de caja' } = {}) {
 <div class="panel panel-resumen">
   <div class="resumen-fila"><span>Cobrado en efectivo</span><strong>${gs(r.porMetodo.efectivo)}</strong></div>
   <div class="resumen-fila"><span>Cobrado por transferencia</span><strong>${gs(r.porMetodo.transferencia)}</strong></div>
-  <div class="resumen-fila"><span>Cobrado con tarjeta</span><strong>${gs(r.porMetodo.tarjeta)}</strong></div>
+  ${r.porMetodo.tarjeta > 0 ? `<div class="resumen-fila"><span>Cobrado con tarjeta</span><strong>${gs(r.porMetodo.tarjeta)}</strong></div>` : ''}
   <div class="resumen-fila"><span>Otros ingresos en efectivo</span><strong>${gs(r.ingresos)}</strong></div>
   <div class="resumen-fila"><span>Egresos / retiros en efectivo</span><strong class="texto-rojo">${gs(-r.egresos)}</strong></div>
   <div class="resumen-fila resumen-esperado"><span>Efectivo que debe haber en caja</span><strong>${gs(esp)}</strong></div>
 </div>
-<p class="ayuda-texto">Las transferencias y las tarjetas no entran en el conteo de efectivo: se cobran fuera de la caja.</p>`;
+<p class="ayuda-texto">Las transferencias no entran en el conteo de efectivo: no pasan por la caja.</p>`;
 }
 
 app.get('/caja', requiereLogin, async (c) => {
@@ -668,14 +736,14 @@ app.get('/caja/:id', requiereLogin, async (c) => {
       <td>${esc(ETIQUETAS_ESPACIO[a.tipo_espacio] || a.tipo_espacio)}</td>
       <td>${esc(a.cliente || '-')}</td>
       <td>${fmtCantidad(a.duracion_horas, a.unidad)}</td>
-      <td>${esc(ETIQUETAS_PAGO[a.metodo_pago] || a.metodo_pago)}</td>
+      <td>${fmtPago(a)}</td>
       <td>${gs(a.total)}</td></tr>`).join('')
     : `<tr><td colspan="6" class="tabla-vacia">Sin alquileres en esta caja.</td></tr>`;
 
   const filasVta = vtas.length ? vtas.map((v) => `<tr>
       <td>#${v.id}</td>
       <td>${fmtFechaHora(v.fecha)}</td>
-      <td>${esc(ETIQUETAS_PAGO[v.metodo_pago] || v.metodo_pago)}</td>
+      <td>${fmtPago(v)}</td>
       <td>${gs(v.total)}</td></tr>`).join('')
     : `<tr><td colspan="4" class="tabla-vacia">Sin ventas de kiosco en esta caja.</td></tr>`;
 
@@ -740,7 +808,7 @@ app.get('/alquileres', requiereLogin, async (c) => {
   const filas = alquileresHoy.length ? alquileresHoy.map((a) => `<tr>
     <td>${esc(a.hora_inicio)}</td><td>${esc(ETIQUETAS_ESPACIO[a.tipo_espacio] || a.tipo_espacio)}</td>
     <td>${esc(a.cliente || '-')}</td><td>${fmtCantidad(a.duracion_horas, a.unidad)}</td><td>${gs(a.total)}</td>
-    <td>${esc(ETIQUETAS_PAGO[a.metodo_pago] || a.metodo_pago)}</td></tr>`).join('')
+    <td>${fmtPago(a)}</td></tr>`).join('')
     : `<tr><td colspan="6" class="tabla-vacia">Todavía no hay alquileres registrados hoy.</td></tr>`;
 
   return c.html(layout(c, { title: 'Alquileres · Tercer Tiempo', body: `
@@ -756,7 +824,8 @@ ${avisoCaja}
     <div><label for="duracion_horas" id="label-cantidad">Cantidad</label><input type="number" id="duracion_horas" name="duracion_horas" min="1" step="1" value="1" required></div>
   </div>
   <label for="metodo_pago">Método de pago</label>
-  <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_PAGO, ETIQUETAS_PAGO, null)}</select>
+  <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_FORM, ETIQUETAS_PAGO, null)}</select>
+  ${BLOQUE_MIXTO}
   <div class="total-preview">Total: <span id="total-alquiler">${gs(0)}</span></div>
   <button type="submit" class="btn btn-primario btn-grande" ${caja ? '' : 'disabled'}>Registrar alquiler</button>
 </form>
@@ -775,8 +844,6 @@ app.post('/alquileres/nuevo', requiereLogin, async (c) => {
   if (!TIPOS_ESPACIO.includes(tipo)) { addFlash(c, 'error', 'Tipo de espacio inválido.'); return irA(c, '/alquileres'); }
   const cliente = String(b.cliente || '').trim();
   let horaInicio = String(b.hora_inicio || '').trim();
-  let metodo = String(b.metodo_pago || 'efectivo');
-  if (!METODOS_PAGO.includes(metodo)) metodo = 'efectivo';
   const pc = await first(c.env, 'SELECT precio_hora, unidad FROM precios_espacio WHERE tipo_espacio=?', tipo);
   const precioUnitario = pc ? pc.precio_hora : 0;
   const unidad = pc && UNIDADES.includes(pc.unidad) ? pc.unidad : (UNIDAD_DEFECTO[tipo] || 'hora');
@@ -785,10 +852,13 @@ app.post('/alquileres/nuevo', requiereLogin, async (c) => {
   // Los juegos y las fichas se cuentan de a uno; solo las horas admiten medias horas
   if (unidad !== 'hora') cant = Math.max(1, Math.round(cant));
   const total = Math.round(precioUnitario * cant);
+  const pago = repartoPago(b, total);
+  if (pago.error) { addFlash(c, 'error', pago.error); return irA(c, '/alquileres'); }
   await run(c.env,
-    `INSERT INTO alquileres (caja_id, tipo_espacio, cliente, fecha, hora_inicio, duracion_horas, unidad, precio_hora, total, metodo_pago, usuario_id, fecha_registro)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    caja.id, tipo, cliente, fechaHoy(), horaInicio || horaActual(), cant, unidad, precioUnitario, total, metodo, c.get('user').id, ahoraTS());
+    `INSERT INTO alquileres (caja_id, tipo_espacio, cliente, fecha, hora_inicio, duracion_horas, unidad, precio_hora, total, metodo_pago, pago_efectivo, pago_transferencia, pago_tarjeta, usuario_id, fecha_registro)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    caja.id, tipo, cliente, fechaHoy(), horaInicio || horaActual(), cant, unidad, precioUnitario, total, pago.metodo,
+    pago.efectivo, pago.transferencia, pago.tarjeta, c.get('user').id, ahoraTS());
   addFlash(c, 'exito', 'Alquiler registrado correctamente.');
   return irA(c, '/alquileres');
 });
@@ -830,7 +900,8 @@ ${avisoCaja}
   ${html}
   <div class="panel-venta-fija">
     <label for="metodo_pago">Método de pago</label>
-    <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_PAGO, ETIQUETAS_PAGO, null)}</select>
+    <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_FORM, ETIQUETAS_PAGO, null)}</select>
+    ${BLOQUE_MIXTO}
     <div class="total-preview">Total: <span id="total-venta">${gs(0)}</span></div>
     <button type="submit" class="btn btn-primario btn-grande" ${caja ? '' : 'disabled'}>Confirmar venta</button>
   </div>
@@ -841,8 +912,6 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   const caja = c.get('cajaActual');
   if (!caja) { addFlash(c, 'error', 'Tenés que abrir la caja antes de registrar una venta.'); return irA(c, '/caja/abrir'); }
   const b = await c.req.parseBody({ all: true });
-  let metodo = String(b.metodo_pago || 'efectivo');
-  if (!METODOS_PAGO.includes(metodo)) metodo = 'efectivo';
   const ids = [].concat(b.producto_id ?? []);
   const cants = [].concat(b.cantidad ?? []);
 
@@ -868,9 +937,20 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   let total = 0;
   for (const [pid, cant] of items) total += productos[pid].precio_venta * cant;
 
+  // parseBody({all:true}) puede devolver arrays; para el pago tomamos el primer valor
+  const unico = (v) => (Array.isArray(v) ? v[0] : v);
+  const pago = repartoPago({
+    metodo_pago: unico(b.metodo_pago),
+    pago_efectivo: unico(b.pago_efectivo),
+    pago_transferencia: unico(b.pago_transferencia),
+    pago_tarjeta: unico(b.pago_tarjeta),
+  }, total);
+  if (pago.error) { addFlash(c, 'error', pago.error); return irA(c, '/kiosco'); }
+
   const ts = ahoraTS();
-  const resVenta = await run(c.env, 'INSERT INTO ventas (caja_id, fecha, total, metodo_pago, usuario_id) VALUES (?,?,?,?,?)',
-    caja.id, ts, total, metodo, c.get('user').id);
+  const resVenta = await run(c.env,
+    'INSERT INTO ventas (caja_id, fecha, total, metodo_pago, pago_efectivo, pago_transferencia, pago_tarjeta, usuario_id) VALUES (?,?,?,?,?,?,?,?)',
+    caja.id, ts, total, pago.metodo, pago.efectivo, pago.transferencia, pago.tarjeta, c.get('user').id);
   const ventaId = resVenta.meta.last_row_id;
 
   const lote = [];
@@ -1479,6 +1559,11 @@ a { color: var(--verde); text-decoration: none; }
 .subtitulo-pagina { margin: 0 0 16px; color: var(--texto-secundario); }
 .titulo-seccion { margin: 28px 0 12px; font-size: 1.2rem; color: var(--texto); }
 .ayuda-texto { color: var(--texto-secundario); font-size: 0.9rem; }
+.texto-suave { color: var(--texto-secundario); font-weight: 400; }
+.panel-mixto { border: 1px solid var(--borde); border-radius: 10px; padding: 0.75rem 0.9rem 0.25rem; margin: 0.5rem 0 0.75rem; background: rgba(0,0,0,0.02); }
+.panel-mixto .formulario-fila { gap: 0.6rem; }
+.panel-mixto label { font-size: 0.85rem; }
+.panel-mixto .ayuda-texto { margin: 0.35rem 0 0.5rem; font-weight: 600; }
 .link-secundario { display: inline-block; margin-top: 14px; font-weight: 600; }
 
 .cabecera-con-boton {
@@ -1740,6 +1825,41 @@ document.addEventListener("DOMContentLoaded", () => {
     setTimeout(() => { flash.style.display = "none"; }, 6000);
   });
 
+  // ---- Cobro mixto: mostrar los montos y avisar si no cuadra ----
+  var totalParaMixto = 0;
+  const selMetodoPago = document.getElementById("metodo_pago");
+  const bloqueMixto = document.getElementById("bloque-mixto");
+  const avisoMixto = document.getElementById("mixto-aviso");
+  const inputsMixto = Array.prototype.slice.call(document.querySelectorAll(".mixto-input"));
+
+  function refrescarMixto() {
+    if (!selMetodoPago || !bloqueMixto) return;
+    const esMixto = selMetodoPago.value === "mixto";
+    bloqueMixto.style.display = esMixto ? "block" : "none";
+    if (!esMixto) { if (avisoMixto) avisoMixto.textContent = ""; return; }
+    let suma = 0;
+    inputsMixto.forEach((i) => { suma += parseInt(String(i.value).replace(/[^0-9]/g, ""), 10) || 0; });
+    if (!avisoMixto) return;
+    const dif = totalParaMixto - suma;
+    if (totalParaMixto <= 0) avisoMixto.textContent = "Cargá primero lo que se cobra.";
+    else if (dif === 0) avisoMixto.textContent = "✅ El reparto cuadra con el total.";
+    else if (dif > 0) avisoMixto.textContent = "Falta repartir " + formatearGuaranies(dif);
+    else avisoMixto.textContent = "Te pasaste por " + formatearGuaranies(-dif);
+  }
+
+  window.avisarTotalMixto = function (t) { totalParaMixto = t; refrescarMixto(); };
+  if (selMetodoPago) selMetodoPago.addEventListener("change", refrescarMixto);
+  inputsMixto.forEach((campo) => campo.addEventListener("input", () => {
+    // Con dos formas de pago, lo que no es efectivo es transferencia: se completa solo
+    if (totalParaMixto > 0 && inputsMixto.length === 2) {
+      const otro = inputsMixto[0] === campo ? inputsMixto[1] : inputsMixto[0];
+      const cargado = parseInt(String(campo.value).replace(/[^0-9]/g, ""), 10) || 0;
+      otro.value = String(Math.max(0, totalParaMixto - cargado));
+    }
+    refrescarMixto();
+  }));
+  refrescarMixto();
+
   // ---- Total en vivo de alquiler ----
   const selectEspacio = document.getElementById("tipo_espacio");
   const inputDuracion = document.getElementById("duracion_horas");
@@ -1760,7 +1880,9 @@ document.addEventListener("DOMContentLoaded", () => {
         inputDuracion.value = String(Math.max(1, Math.round(parseFloat(inputDuracion.value || "1"))));
       }
       const cantidad = parseFloat(inputDuracion.value || "0");
-      totalSpanAlq.textContent = formatearGuaranies(Math.round(precio * cantidad));
+      const totalAlq = Math.round(precio * cantidad);
+      totalSpanAlq.textContent = formatearGuaranies(totalAlq);
+      if (window.avisarTotalMixto) window.avisarTotalMixto(totalAlq);
     };
     selectEspacio.addEventListener("change", actualizar);
     inputDuracion.addEventListener("input", actualizar);
@@ -1798,6 +1920,7 @@ const JS_KIOSCO = `document.addEventListener("DOMContentLoaded", () => {
       total += precio * cantidad;
     });
     if (totalSpan) totalSpan.textContent = formatearGuaranies(total);
+    if (window.avisarTotalMixto) window.avisarTotalMixto(total);
   }
 
   document.querySelectorAll(".stepper-btn").forEach((boton) => {
