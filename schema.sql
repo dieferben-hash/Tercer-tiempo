@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS usuarios (
 CREATE TABLE IF NOT EXISTS precios_espacio (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tipo_espacio TEXT UNIQUE NOT NULL,
-  precio_hora INTEGER NOT NULL DEFAULT 0
+  precio_hora INTEGER NOT NULL DEFAULT 0,   -- precio por unidad (hora, juego o ficha)
+  unidad TEXT NOT NULL DEFAULT 'hora'       -- hora | juego | ficha
 );
 
 CREATE TABLE IF NOT EXISTS configuracion (
@@ -32,6 +33,8 @@ CREATE TABLE IF NOT EXISTS productos (
   precio_costo INTEGER DEFAULT 0,
   stock INTEGER NOT NULL DEFAULT 0,
   stock_minimo INTEGER NOT NULL DEFAULT 5,
+  cantidad_promo INTEGER DEFAULT 0,   -- ej: 3  (para "3 x 20.000")
+  precio_promo INTEGER DEFAULT 0,     -- ej: 20000
   activo INTEGER NOT NULL DEFAULT 1
 );
 
@@ -56,12 +59,26 @@ CREATE TABLE IF NOT EXISTS cajas (
   total_alquileres INTEGER DEFAULT 0,
   total_kiosco INTEGER DEFAULT 0,
   total_general INTEGER DEFAULT 0,
+  total_efectivo INTEGER DEFAULT 0,
+  total_transferencia INTEGER DEFAULT 0,
+  total_tarjeta INTEGER DEFAULT 0,
+  total_egresos INTEGER DEFAULT 0,
+  total_ingresos_extra INTEGER DEFAULT 0,
+  costo_kiosco INTEGER DEFAULT 0,
   monto_esperado INTEGER DEFAULT 0,
   monto_contado INTEGER,
   diferencia INTEGER,
-  total_efectivo INTEGER DEFAULT 0,
-  total_transferencia INTEGER DEFAULT 0,
-  total_tarjeta INTEGER DEFAULT 0
+  observaciones TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS movimientos_caja (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  caja_id INTEGER NOT NULL REFERENCES cajas(id),
+  tipo TEXT NOT NULL,                -- egreso | ingreso
+  concepto TEXT DEFAULT '',
+  monto INTEGER NOT NULL DEFAULT 0,
+  fecha TEXT DEFAULT (datetime('now')),
+  usuario_id INTEGER REFERENCES usuarios(id)
 );
 
 CREATE TABLE IF NOT EXISTS alquileres (
@@ -71,13 +88,14 @@ CREATE TABLE IF NOT EXISTS alquileres (
   cliente TEXT DEFAULT '',
   fecha TEXT,
   hora_inicio TEXT NOT NULL,
-  duracion_horas REAL NOT NULL DEFAULT 1.0,
+  duracion_horas REAL NOT NULL DEFAULT 1.0,  -- cantidad: horas, juegos o fichas
+  unidad TEXT DEFAULT 'hora',
   precio_hora INTEGER NOT NULL DEFAULT 0,
   total INTEGER NOT NULL DEFAULT 0,
-  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
-  monto_efectivo INTEGER NOT NULL DEFAULT 0,
-  monto_transferencia INTEGER NOT NULL DEFAULT 0,
-  monto_tarjeta INTEGER NOT NULL DEFAULT 0,
+  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',  -- efectivo | transferencia | tarjeta | mixto
+  pago_efectivo INTEGER DEFAULT 0,
+  pago_transferencia INTEGER DEFAULT 0,
+  pago_tarjeta INTEGER DEFAULT 0,
   usuario_id INTEGER REFERENCES usuarios(id),
   fecha_registro TEXT DEFAULT (datetime('now'))
 );
@@ -87,10 +105,10 @@ CREATE TABLE IF NOT EXISTS ventas (
   caja_id INTEGER NOT NULL REFERENCES cajas(id),
   fecha TEXT DEFAULT (datetime('now')),
   total INTEGER NOT NULL DEFAULT 0,
-  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
-  monto_efectivo INTEGER NOT NULL DEFAULT 0,
-  monto_transferencia INTEGER NOT NULL DEFAULT 0,
-  monto_tarjeta INTEGER NOT NULL DEFAULT 0,
+  metodo_pago TEXT NOT NULL DEFAULT 'efectivo',  -- efectivo | transferencia | tarjeta | mixto
+  pago_efectivo INTEGER DEFAULT 0,
+  pago_transferencia INTEGER DEFAULT 0,
+  pago_tarjeta INTEGER DEFAULT 0,
   usuario_id INTEGER REFERENCES usuarios(id)
 );
 
@@ -100,12 +118,14 @@ CREATE TABLE IF NOT EXISTS venta_detalles (
   producto_id INTEGER NOT NULL REFERENCES productos(id),
   cantidad INTEGER NOT NULL,
   precio_unitario INTEGER NOT NULL,
+  costo_unitario INTEGER DEFAULT 0,
   subtotal INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_alq_fecha ON alquileres(fecha_registro);
 CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas(fecha);
 CREATE INDEX IF NOT EXISTS idx_mov_fecha ON movimientos_stock(fecha);
+CREATE INDEX IF NOT EXISTS idx_mov_caja ON movimientos_caja(caja_id);
 
 -- ============================================================
 --  Datos iniciales (se insertan solo si no existen)
@@ -119,14 +139,14 @@ SELECT 'Administrador', 'admin',
 WHERE NOT EXISTS (SELECT 1 FROM usuarios WHERE usuario = 'admin');
 
 -- Precios por hora por defecto
-INSERT INTO precios_espacio (tipo_espacio, precio_hora)
-SELECT 'futsal', 100000 WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='futsal');
-INSERT INTO precios_espacio (tipo_espacio, precio_hora)
-SELECT 'voley', 60000 WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='voley');
-INSERT INTO precios_espacio (tipo_espacio, precio_hora)
-SELECT 'billar', 20000 WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='billar');
-INSERT INTO precios_espacio (tipo_espacio, precio_hora)
-SELECT 'otro', 15000 WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='otro');
+INSERT INTO precios_espacio (tipo_espacio, precio_hora, unidad)
+SELECT 'futsal', 100000, 'hora' WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='futsal');
+INSERT INTO precios_espacio (tipo_espacio, precio_hora, unidad)
+SELECT 'voley', 20000, 'juego' WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='voley');
+INSERT INTO precios_espacio (tipo_espacio, precio_hora, unidad)
+SELECT 'billar', 5000, 'ficha' WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='billar');
+INSERT INTO precios_espacio (tipo_espacio, precio_hora, unidad)
+SELECT 'otro', 15000, 'hora' WHERE NOT EXISTS (SELECT 1 FROM precios_espacio WHERE tipo_espacio='otro');
 
 -- Nombre del negocio
 INSERT INTO configuracion (clave, valor)

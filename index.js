@@ -163,6 +163,19 @@ async function totalesRango(env, fi, ff) {
 // ---- Arqueo de caja: los totales se calculan POR CAJA (no por dia) ----
 const COSTO_SQL = 'COALESCE(NULLIF(vd.costo_unitario,0), p.precio_costo, 0)';
 
+// Precio de N unidades aplicando promo por cantidad (ej: 3 x 20.000).
+// Los grupos completos van al precio de promo y el resto al precio normal.
+function precioItem(producto, cantidad) {
+  const cp = producto.cantidad_promo || 0;
+  const pp = producto.precio_promo || 0;
+  if (cp > 1 && pp > 0) {
+    const grupos = Math.floor(cantidad / cp);
+    const resto = cantidad % cp;
+    return grupos * pp + resto * producto.precio_venta;
+  }
+  return producto.precio_venta * cantidad;
+}
+
 // Reparto del cobro por caja de dinero. Si las columnas nuevas estan en cero
 // (filas viejas), cae al metodo_pago de la fila para no perder plata en el arqueo.
 const SQL_REPARTO = `
@@ -992,10 +1005,11 @@ app.get('/kiosco', requiereLogin, async (c) => {
     <div class="producto-card ${p.stock <= 0 ? 'producto-sin-stock' : ''}">
       <div class="producto-nombre">${esc(p.nombre)}</div>
       <div class="producto-precio">${gs(p.precio_venta)}</div>
+      ${(p.cantidad_promo > 1 && p.precio_promo > 0) ? `<div class="producto-promo">🏷️ ${p.cantidad_promo} x ${gs(p.precio_promo)}</div>` : ''}
       <div class="producto-stock">Stock: ${p.stock}</div>
       <div class="stepper">
         <button type="button" class="stepper-btn" data-accion="restar">−</button>
-        <input type="number" class="stepper-input" name="cantidad" value="0" min="0" max="${p.stock}" data-precio="${p.precio_venta}" data-stock="${p.stock}" readonly>
+        <input type="number" class="stepper-input" name="cantidad" value="0" min="0" max="${p.stock}" data-precio="${p.precio_venta}" data-stock="${p.stock}" data-cantpromo="${p.cantidad_promo || 0}" data-preciopromo="${p.precio_promo || 0}" readonly>
         <button type="button" class="stepper-btn" data-accion="sumar">+</button>
       </div>
       <input type="hidden" name="producto_id" value="${p.id}">
@@ -1046,7 +1060,7 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   }
 
   let total = 0;
-  for (const [pid, cant] of items) total += productos[pid].precio_venta * cant;
+  for (const [pid, cant] of items) total += precioItem(productos[pid], cant);
 
   // parseBody({all:true}) puede devolver arrays; para el pago tomamos el primer valor
   const unico = (v) => (Array.isArray(v) ? v[0] : v);
@@ -1067,7 +1081,7 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   const lote = [];
   for (const [pid, cant] of items) {
     const p = productos[pid];
-    const subtotal = p.precio_venta * cant;
+    const subtotal = precioItem(p, cant);
     lote.push(c.env.DB.prepare('INSERT INTO venta_detalles (venta_id, producto_id, cantidad, precio_unitario, costo_unitario, subtotal) VALUES (?,?,?,?,?,?)')
       .bind(ventaId, p.id, cant, p.precio_venta, p.precio_costo || 0, subtotal));
     lote.push(c.env.DB.prepare('UPDATE productos SET stock = stock - ? WHERE id=?').bind(cant, p.id));
@@ -1157,6 +1171,13 @@ function formProducto(c, producto) {
   ${!editar ? `<label for="stock">Stock inicial</label><input type="number" id="stock" name="stock" value="0" min="0">` : ''}
   <label for="stock_minimo">Stock mínimo (para alertas)</label>
   <input type="number" id="stock_minimo" name="stock_minimo" value="${producto ? producto.stock_minimo : 5}" min="0">
+  <div class="formulario-fila">
+    <div><label for="cantidad_promo">Cantidad para promo</label>
+      <input type="number" id="cantidad_promo" name="cantidad_promo" min="0" value="${producto ? (producto.cantidad_promo || 0) : 0}"></div>
+    <div><label for="precio_promo">Precio de esa cantidad (₲)</label>
+      <input type="text" inputmode="numeric" id="precio_promo" name="precio_promo" value="${producto ? (producto.precio_promo || 0) : 0}"></div>
+  </div>
+  <p class="ayuda-texto">Ej: 3 y 20.000 para vender "3 x ₲ 20.000". Dejalo en 0 si no hay promo.</p>
   <button type="submit" class="btn btn-primario btn-grande">Guardar</button>
 </form>` });
 }
@@ -1167,8 +1188,9 @@ app.post('/stock/nuevo', requiereLogin, requiereAdmin, async (c) => {
   const b = await c.req.parseBody();
   let cat = String(b.categoria || 'otro');
   if (!CATEGORIAS_PRODUCTO.includes(cat)) cat = 'otro';
-  await run(c.env, 'INSERT INTO productos (nombre, categoria, precio_venta, precio_costo, stock, stock_minimo) VALUES (?,?,?,?,?,?)',
-    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock), aEntero(b.stock_minimo ?? 5));
+  await run(c.env, 'INSERT INTO productos (nombre, categoria, precio_venta, precio_costo, stock, stock_minimo, cantidad_promo, precio_promo) VALUES (?,?,?,?,?,?,?,?)',
+    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock), aEntero(b.stock_minimo ?? 5),
+    aEntero(b.cantidad_promo), aEntero(b.precio_promo));
   addFlash(c, 'exito', 'Producto creado correctamente.');
   return irA(c, '/stock');
 });
@@ -1187,8 +1209,9 @@ app.post('/stock/:id/editar', requiereLogin, requiereAdmin, async (c) => {
   const b = await c.req.parseBody();
   let cat = String(b.categoria || 'otro');
   if (!CATEGORIAS_PRODUCTO.includes(cat)) cat = 'otro';
-  await run(c.env, 'UPDATE productos SET nombre=?, categoria=?, precio_venta=?, precio_costo=?, stock_minimo=? WHERE id=?',
-    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock_minimo ?? 5), id);
+  await run(c.env, 'UPDATE productos SET nombre=?, categoria=?, precio_venta=?, precio_costo=?, stock_minimo=?, cantidad_promo=?, precio_promo=? WHERE id=?',
+    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock_minimo ?? 5),
+    aEntero(b.cantidad_promo), aEntero(b.precio_promo), id);
   addFlash(c, 'exito', 'Producto actualizado correctamente.');
   return irA(c, '/stock');
 });
@@ -1671,6 +1694,7 @@ a { color: var(--verde); text-decoration: none; }
 .titulo-seccion { margin: 28px 0 12px; font-size: 1.2rem; color: var(--texto); }
 .ayuda-texto { color: var(--texto-secundario); font-size: 0.9rem; }
 .texto-suave { color: var(--texto-secundario); font-weight: 400; }
+.producto-promo { font-size: 0.8rem; font-weight: 600; color: var(--naranja-oscuro); background: var(--naranja-claro); border-radius: 6px; padding: 1px 6px; display: inline-block; margin: 2px 0; }
 .panel-mixto { border: 1px solid var(--borde); border-radius: 10px; padding: 0.75rem 0.9rem 0.25rem; margin: 0.5rem 0 0.75rem; background: rgba(0,0,0,0.02); }
 .panel-mixto .formulario-fila { gap: 0.6rem; }
 .panel-mixto label { font-size: 0.85rem; }
@@ -2031,7 +2055,15 @@ const JS_KIOSCO = `document.addEventListener("DOMContentLoaded", () => {
     document.querySelectorAll(".stepper-input").forEach((input) => {
       const precio = parseFloat(input.dataset.precio || "0");
       const cantidad = parseInt(input.value || "0", 10);
-      total += precio * cantidad;
+      const cp = parseInt(input.dataset.cantpromo || "0", 10);
+      const pp = parseFloat(input.dataset.preciopromo || "0");
+      if (cp > 1 && pp > 0) {
+        const grupos = Math.floor(cantidad / cp);
+        const resto = cantidad % cp;
+        total += grupos * pp + resto * precio;
+      } else {
+        total += precio * cantidad;
+      }
     });
     if (totalSpan) totalSpan.textContent = formatearGuaranies(total);
     if (window.avisarTotalMixto) window.avisarTotalMixto(total);
