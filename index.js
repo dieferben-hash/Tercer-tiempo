@@ -508,7 +508,8 @@ app.post('/login', async (c) => {
   const b = await c.req.parseBody();
   const usuarioInput = String(b.usuario || '').trim();
   const password = String(b.password || '');
-  const u = await first(c.env, 'SELECT * FROM usuarios WHERE usuario=?', usuarioInput);
+  // El nombre de acceso no distingue mayusculas: "Cholo", "cholo" y "CHOLO" son el mismo.
+  const u = await first(c.env, 'SELECT * FROM usuarios WHERE lower(usuario)=lower(?)', usuarioInput);
   if (u && u.activo && await verifyPassword(password, u.password_hash)) {
     await setSignedCookie(c, 'sesion', String(u.id), c.env.SECRET_KEY, { path: '/', httpOnly: true, sameSite: 'Lax', maxAge: 60 * 60 * 24 * 30 });
     const next = c.req.query('next');
@@ -1474,7 +1475,7 @@ app.post('/configuracion/usuarios/nuevo', requiereLogin, requiereAdmin, async (c
   let rol = String(b.rol || 'cajero');
   if (!ROLES.includes(rol)) rol = 'cajero';
   if (!nombre || !usuarioLogin || !password) { addFlash(c, 'error', 'Completá todos los campos.'); return c.html(formUsuario(c, null)); }
-  const existe = await first(c.env, 'SELECT id FROM usuarios WHERE usuario=?', usuarioLogin);
+  const existe = await first(c.env, 'SELECT id FROM usuarios WHERE lower(usuario)=lower(?)', usuarioLogin);
   if (existe) { addFlash(c, 'error', 'Ya existe un usuario con ese nombre de acceso.'); return c.html(formUsuario(c, null)); }
   await run(c.env, 'INSERT INTO usuarios (nombre, usuario, password_hash, rol, creado_en) VALUES (?,?,?,?,?)',
     nombre, usuarioLogin, await hashPassword(password), rol, ahoraTS());
