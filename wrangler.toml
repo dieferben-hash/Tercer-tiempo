@@ -11,3 +11,10 @@ compatibility_date = "2024-11-01"
 binding = "DB"
 database_name = "tercer-tiempo-db"
 database_id = "81cd837f-59a2-4516-a0d1-27e0221f77d9"
+
+# Cierre automatico de caja.
+# 08:00 UTC = 05:00 de Paraguay (UTC-3 fijo todo el año desde la Ley 7354/2024,
+# ya no hay horario de invierno, asi que este horario no se desfasa nunca).
+# Se eligio las 5 AM porque el complejo a veces sigue con movimiento hasta las 2.
+[triggers]
+crons = ["0 8 * * *"]

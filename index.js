@@ -6,37 +6,22 @@ import { getSignedCookie, setSignedCookie, getCookie, setCookie, deleteCookie } 
 // ============================================================
 const ROLES = ['administrador', 'cajero'];
 const TIPOS_ESPACIO = ['futsal', 'voley', 'billar', 'otro'];
-const ETIQUETAS_ESPACIO = { futsal: 'Futsal / Fútbol', voley: 'Vóley', billar: 'Billar', otro: 'Otros juegos' };
+const ETIQUETAS_ESPACIO = { futsal: 'Futsal / Fútbol', voley: 'Vóley / Piki', billar: 'Billar', otro: 'Otros juegos' };
+// Como se cobra cada espacio: por hora, por juego o por ficha
+const UNIDADES = ['hora', 'juego', 'ficha'];
+const ETIQUETAS_UNIDAD = { hora: 'Por hora', juego: 'Por juego', ficha: 'Por ficha' };
+const UNIDAD_SINGULAR = { hora: 'hora', juego: 'juego', ficha: 'ficha' };
+const UNIDAD_PLURAL = { hora: 'horas', juego: 'juegos', ficha: 'fichas' };
+const UNIDAD_CAMPO = { hora: 'Cantidad de horas', juego: 'Cantidad de juegos', ficha: 'Cantidad de fichas' };
+const UNIDAD_DEFECTO = { futsal: 'hora', voley: 'juego', billar: 'ficha', otro: 'hora' };
 const CATEGORIAS_PRODUCTO = ['bebida_sin_alcohol', 'bebida_alcoholica', 'comida_rapida', 'otro'];
 const ETIQUETAS_CATEGORIA = { bebida_sin_alcohol: 'Bebida sin alcohol', bebida_alcoholica: 'Bebida alcohólica', comida_rapida: 'Comida rápida', otro: 'Otro' };
 const METODOS_PAGO = ['efectivo', 'transferencia', 'tarjeta'];
-const METODOS_PAGO_OPCIONES = ['efectivo', 'transferencia', 'tarjeta', 'mixto'];
+// 'mixto' no es una caja de dinero: es un cobro repartido entre las tres de arriba
+// La tarjeta no se usa en el complejo: queda la columna en la base, pero no se ofrece.
+// Para volver a habilitarla basta con agregar 'tarjeta' de nuevo a esta lista.
+const METODOS_FORM = ['efectivo', 'transferencia', 'mixto'];
 const ETIQUETAS_PAGO = { efectivo: 'Efectivo', transferencia: 'Transferencia', tarjeta: 'Tarjeta', mixto: 'Mixto' };
-const ETIQUETAS_PAGO_LARGA = { efectivo: 'Efectivo', transferencia: 'Transferencia', tarjeta: 'Tarjeta', mixto: 'Mixto (efectivo + transferencia)' };
-
-// Divide un total entre metodos de pago. Para "mixto" usa el monto en efectivo ingresado.
-function desglosePago(metodo, total, efectivoInput) {
-  let ef = 0, tr = 0, ta = 0;
-  if (metodo === 'transferencia') tr = total;
-  else if (metodo === 'tarjeta') ta = total;
-  else if (metodo === 'mixto') { ef = Math.max(0, Math.min(efectivoInput || 0, total)); tr = total - ef; }
-  else { metodo = 'efectivo'; ef = total; }
-  return { metodo, ef, tr, ta };
-}
-function opcionesPago(sel) {
-  return METODOS_PAGO_OPCIONES.map((v) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${esc(ETIQUETAS_PAGO_LARGA[v])}</option>`).join('');
-}
-// Calcula el subtotal de un producto aplicando promo por cantidad (ej: 3 x 20.000).
-function precioItem(producto, cantidad) {
-  const cp = producto.cantidad_promo || 0;
-  const pp = producto.precio_promo || 0;
-  if (cp > 1 && pp > 0) {
-    const grupos = Math.floor(cantidad / cp);
-    const resto = cantidad % cp;
-    return grupos * pp + resto * producto.precio_venta;
-  }
-  return producto.precio_venta * cantidad;
-}
 
 const TZ = 'America/Asuncion';
 
@@ -80,6 +65,14 @@ function fmtFechaHora(s) {
   const [a, m, d] = f.split('-');
   return `${d}/${m}/${a}${h ? ' ' + h : ''}`;
 }
+// "1,5 horas" / "3 juegos" / "2 fichas"
+function fmtCantidad(cant, unidad) {
+  const u = UNIDADES.includes(unidad) ? unidad : 'hora';
+  const n = Number(cant) || 0;
+  const texto = Number.isInteger(n) ? String(n) : String(n).replace('.', ',');
+  return `${texto} ${n === 1 ? UNIDAD_SINGULAR[u] : UNIDAD_PLURAL[u]}`;
+}
+
 function fmtFecha(s) {
   if (!s) return '-';
   const [a, m, d] = String(s).slice(0, 10).split('-');
@@ -138,6 +131,11 @@ async function totalKioscoDia(env, f) {
   const r = await first(env, 'SELECT COALESCE(SUM(total),0) AS t FROM ventas WHERE fecha>=? AND fecha<=?', i, fin);
   return r ? r.t : 0;
 }
+// El complejo trabaja pasada la medianoche, asi que el "dia de trabajo" real es
+// el turno de caja, no la fecha del calendario. Estas consultas van por caja_id.
+const alquileresDeTurno = (env, cajaId) => all(env,
+  'SELECT * FROM alquileres WHERE caja_id=? ORDER BY fecha_registro DESC', cajaId);
+
 async function alquileresDelDia(env, f) {
   const [i, fin] = rangoDia(f);
   return all(env, 'SELECT * FROM alquileres WHERE fecha_registro>=? AND fecha_registro<=? ORDER BY fecha_registro DESC', i, fin);
@@ -149,7 +147,8 @@ async function alquileresPorTipoDia(env, f) {
 async function productosMasVendidosDia(env, f, limite = 5) {
   const [i, fin] = rangoDia(f);
   return all(env,
-    `SELECT p.nombre AS nombre, COALESCE(SUM(vd.cantidad),0) AS cantidad, COALESCE(SUM(vd.subtotal),0) AS total
+    `SELECT p.nombre AS nombre, COALESCE(SUM(vd.cantidad),0) AS cantidad, COALESCE(SUM(vd.subtotal),0) AS total,
+            COALESCE(SUM(COALESCE(NULLIF(vd.costo_unitario,0), p.precio_costo, 0) * vd.cantidad),0) AS costo
      FROM venta_detalles vd JOIN ventas v ON vd.venta_id=v.id JOIN productos p ON vd.producto_id=p.id
      WHERE v.fecha>=? AND v.fecha<=? GROUP BY p.id ORDER BY SUM(vd.cantidad) DESC LIMIT ?`, i, fin, limite);
 }
@@ -160,11 +159,181 @@ async function totalesRango(env, fi, ff) {
   const k = await first(env, 'SELECT COALESCE(SUM(total),0) AS t FROM ventas WHERE fecha>=? AND fecha<=?', i, fin);
   return [a ? a.t : 0, k ? k.t : 0];
 }
-async function totalesPorMetodoDia(env, f) {
-  const [i, fin] = rangoDia(f);
-  const a = await first(env, 'SELECT COALESCE(SUM(monto_efectivo),0) ef, COALESCE(SUM(monto_transferencia),0) tr, COALESCE(SUM(monto_tarjeta),0) ta FROM alquileres WHERE fecha_registro>=? AND fecha_registro<=?', i, fin);
-  const v = await first(env, 'SELECT COALESCE(SUM(monto_efectivo),0) ef, COALESCE(SUM(monto_transferencia),0) tr, COALESCE(SUM(monto_tarjeta),0) ta FROM ventas WHERE fecha>=? AND fecha<=?', i, fin);
-  return { ef: (a?.ef || 0) + (v?.ef || 0), tr: (a?.tr || 0) + (v?.tr || 0), ta: (a?.ta || 0) + (v?.ta || 0) };
+
+// ---- Arqueo de caja: los totales se calculan POR CAJA (no por dia) ----
+const COSTO_SQL = 'COALESCE(NULLIF(vd.costo_unitario,0), p.precio_costo, 0)';
+
+// Reparto del cobro por caja de dinero. Si las columnas nuevas estan en cero
+// (filas viejas), cae al metodo_pago de la fila para no perder plata en el arqueo.
+const SQL_REPARTO = `
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_efectivo,0)
+    WHEN metodo_pago='efectivo' THEN total ELSE 0 END),0) AS efectivo,
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_transferencia,0)
+    WHEN metodo_pago='transferencia' THEN total ELSE 0 END),0) AS transferencia,
+  COALESCE(SUM(CASE
+    WHEN COALESCE(pago_efectivo,0)+COALESCE(pago_transferencia,0)+COALESCE(pago_tarjeta,0) > 0 THEN COALESCE(pago_tarjeta,0)
+    WHEN metodo_pago='tarjeta' THEN total ELSE 0 END),0) AS tarjeta,
+  COALESCE(SUM(total),0) AS t, COUNT(id) AS n`;
+
+// Toma lo que vino del formulario y devuelve como se reparte el cobro.
+// Devuelve { error } si el reparto mixto no cuadra con el total.
+function repartoPago(b, total) {
+  const num = (v) => {
+    const n = parseInt(String(v == null ? '0' : v).replace(/[^0-9]/g, ''), 10);
+    return Number.isNaN(n) ? 0 : n;
+  };
+  let metodo = String(b.metodo_pago || 'efectivo');
+  if (!METODOS_FORM.includes(metodo)) metodo = 'efectivo';
+
+  if (metodo !== 'mixto') {
+    const r = { metodo, efectivo: 0, transferencia: 0, tarjeta: 0 };
+    r[metodo] = total;
+    return r;
+  }
+
+  const efectivo = num(b.pago_efectivo);
+  const transferencia = num(b.pago_transferencia);
+  const tarjeta = num(b.pago_tarjeta);
+  const suma = efectivo + transferencia + tarjeta;
+  if (suma !== total) {
+    const dif = total - suma;
+    return { error: 'El pago mixto no cuadra: el total es ' + gs(total) + ' y repartiste ' + gs(suma) + '. '
+      + (dif > 0 ? 'Falta ' + gs(dif) + '.' : 'Te pasaste por ' + gs(-dif) + '.') };
+  }
+  // Si al final cargo una sola forma de pago, se guarda como pago simple
+  const usadas = METODOS_PAGO.filter((m) => ({ efectivo, transferencia, tarjeta })[m] > 0);
+  if (usadas.length === 1) return { metodo: usadas[0], efectivo, transferencia, tarjeta };
+  return { metodo: 'mixto', efectivo, transferencia, tarjeta };
+}
+
+// Celda "Pago" de las tablas: los mixtos muestran el desglose
+function fmtPago(r) {
+  if (r.metodo_pago !== 'mixto') return esc(ETIQUETAS_PAGO[r.metodo_pago] || r.metodo_pago);
+  const partes = [];
+  if (r.pago_efectivo > 0) partes.push('efvo. ' + gs(r.pago_efectivo));
+  if (r.pago_transferencia > 0) partes.push('transf. ' + gs(r.pago_transferencia));
+  if (r.pago_tarjeta > 0) partes.push('tarj. ' + gs(r.pago_tarjeta));
+  return 'Mixto' + (partes.length ? ' <small class="texto-suave">(' + esc(partes.join(' · ')) + ')</small>' : '');
+}
+
+// Bloque de montos que aparece al elegir "Mixto"
+const BLOQUE_MIXTO = `
+<div id="bloque-mixto" class="panel-mixto" style="display:none">
+  <div class="formulario-fila">
+    <div><label for="pago_efectivo">Efectivo</label>
+      <input type="number" class="mixto-input" id="pago_efectivo" name="pago_efectivo" min="0" step="1000" value="0"></div>
+    <div><label for="pago_transferencia">Transferencia</label>
+      <input type="number" class="mixto-input" id="pago_transferencia" name="pago_transferencia" min="0" step="1000" value="0"></div>
+  </div>
+  <p class="ayuda-texto" id="mixto-aviso"></p>
+</div>`;
+
+async function resumenCaja(env, cajaId) {
+  const alqR = await first(env, 'SELECT ' + SQL_REPARTO + ' FROM alquileres WHERE caja_id=?', cajaId);
+  const venR = await first(env, 'SELECT ' + SQL_REPARTO + ' FROM ventas WHERE caja_id=?', cajaId);
+  const movRows = await all(env, 'SELECT tipo, COALESCE(SUM(monto),0) AS t FROM movimientos_caja WHERE caja_id=? GROUP BY tipo', cajaId);
+  const cmv = await first(env,
+    `SELECT COALESCE(SUM(${COSTO_SQL} * vd.cantidad),0) AS t
+     FROM venta_detalles vd JOIN ventas v ON vd.venta_id=v.id JOIN productos p ON vd.producto_id=p.id
+     WHERE v.caja_id=?`, cajaId);
+
+  const reparto = (row) => ({
+    efectivo: row ? row.efectivo : 0,
+    transferencia: row ? row.transferencia : 0,
+    tarjeta: row ? row.tarjeta : 0,
+  });
+  const alq = reparto(alqR), kio = reparto(venR);
+  const alqTotal = alqR ? alqR.t : 0, kioTotal = venR ? venR.t : 0;
+  const alqCant = alqR ? alqR.n : 0, kioCant = venR ? venR.n : 0;
+  let egresos = 0, ingresos = 0;
+  for (const r of movRows) { if (r.tipo === 'egreso') egresos += r.t; else ingresos += r.t; }
+  const porMetodo = {
+    efectivo: alq.efectivo + kio.efectivo,
+    transferencia: alq.transferencia + kio.transferencia,
+    tarjeta: alq.tarjeta + kio.tarjeta,
+  };
+  const costoKiosco = cmv ? cmv.t : 0;
+  return {
+    alq, kio, alqTotal, kioTotal, alqCant, kioCant, porMetodo, egresos, ingresos,
+    totalGeneral: alqTotal + kioTotal,
+    costoKiosco, utilidadKiosco: kioTotal - costoKiosco,
+  };
+}
+
+// Efectivo que TIENE que haber en la caja (solo efectivo, no transferencias ni tarjeta)
+const efectivoEsperado = (caja, r) => (caja.monto_inicial || 0) + r.porMetodo.efectivo + r.ingresos - r.egresos;
+
+// Horas transcurridas entre un timestamp guardado y ahora. Los dos estan en hora
+// de Paraguay con el mismo formato, asi que se comparan como si fueran UTC.
+function horasDesde(ts) {
+  const a = Date.parse(String(ts || '').replace(' ', 'T') + 'Z');
+  const b = Date.parse(ahoraTS().replace(' ', 'T') + 'Z');
+  return Number.isNaN(a) ? 9999 : (b - a) / 3600000;
+}
+
+// Una caja cerrada sin conteo es una caja con el arqueo pendiente.
+const arqueoPendiente = (k) => k.estado === 'cerrada' && (k.monto_contado === null || k.monto_contado === undefined);
+const cajasConArqueoPendiente = (env) => all(env,
+  "SELECT * FROM cajas WHERE estado='cerrada' AND monto_contado IS NULL ORDER BY id DESC");
+
+// Cierra la caja congelando todos los totales, pero SIN inventar el conteo:
+// monto_contado y diferencia quedan en NULL hasta que alguien cuente la plata.
+async function cerrarCajaSinArqueo(env, caja, nota) {
+  const r = await resumenCaja(env, caja.id);
+  const esperado = efectivoEsperado(caja, r);
+  const obs = [String(caja.observaciones || '').trim(), nota].filter(Boolean).join(' ');
+  await run(env,
+    `UPDATE cajas SET total_alquileres=?, total_kiosco=?, total_general=?,
+     total_efectivo=?, total_transferencia=?, total_tarjeta=?, total_egresos=?, total_ingresos_extra=?,
+     costo_kiosco=?, monto_esperado=?, monto_contado=NULL, diferencia=NULL, observaciones=?,
+     estado='cerrada', fecha_cierre=? WHERE id=?`,
+    r.alqTotal, r.kioTotal, r.totalGeneral,
+    r.porMetodo.efectivo, r.porMetodo.transferencia, r.porMetodo.tarjeta, r.egresos, r.ingresos,
+    r.costoKiosco, esperado, obs, ahoraTS(), caja.id);
+  return esperado;
+}
+
+// Tarea de madrugada: cierra las cajas que quedaron abiertas de la noche anterior.
+// No toca una caja abierta hace menos de HORAS_MINIMAS, por si alguien abrio recien.
+const HORAS_MINIMAS_PARA_CIERRE_AUTO = 4;
+async function cierreAutomaticoDeCajas(env) {
+  const abiertas = await all(env, "SELECT * FROM cajas WHERE estado='abierta'");
+  const cerradas = [];
+  for (const caja of abiertas) {
+    if (horasDesde(caja.fecha_apertura) < HORAS_MINIMAS_PARA_CIERRE_AUTO) continue;
+    await cerrarCajaSinArqueo(env, caja,
+      '[Cerrada automaticamente por el sistema a las ' + horaActual() + '. Arqueo pendiente: falta cargar el efectivo contado.]');
+    cerradas.push(caja.id);
+  }
+  return cerradas;
+}
+
+const movimientosDeCaja = (env, cajaId) => all(env,
+  `SELECT m.*, u.nombre AS usuario FROM movimientos_caja m
+   LEFT JOIN usuarios u ON m.usuario_id=u.id WHERE m.caja_id=? ORDER BY m.id DESC`, cajaId);
+
+const alquileresDeCaja = (env, cajaId) => all(env, 'SELECT * FROM alquileres WHERE caja_id=? ORDER BY id DESC', cajaId);
+const ventasDeCaja = (env, cajaId) => all(env, 'SELECT * FROM ventas WHERE caja_id=? ORDER BY id DESC', cajaId);
+
+// ---- Costo / ganancia del kiosco por fecha o rango ----
+async function utilidadKiosco(env, desde, hasta) {
+  const r = await first(env,
+    `SELECT COALESCE(SUM(vd.subtotal),0) AS venta, COALESCE(SUM(${COSTO_SQL} * vd.cantidad),0) AS costo
+     FROM venta_detalles vd JOIN ventas v ON vd.venta_id=v.id JOIN productos p ON vd.producto_id=p.id
+     WHERE v.fecha>=? AND v.fecha<=?`, desde, hasta);
+  const venta = r ? r.venta : 0, costo = r ? r.costo : 0;
+  return { venta, costo, utilidad: venta - costo };
+}
+const utilidadKioscoDia = (env, f) => { const [i, fin] = rangoDia(f); return utilidadKiosco(env, i, fin); };
+const utilidadKioscoRango = (env, fi, ff) => utilidadKiosco(env, `${fi} 00:00:00`, `${ff} 23:59:59`);
+
+// Margen de un producto en % sobre el precio de venta
+function margenPct(precioVenta, precioCosto) {
+  const v = Number(precioVenta) || 0, cst = Number(precioCosto) || 0;
+  if (!v || !cst) return null;
+  return Math.round(((v - cst) / v) * 1000) / 10;
 }
 
 // ============================================================
@@ -176,6 +345,15 @@ function opciones(lista, etiquetas, seleccionado, dataPrecios) {
     const sel = v === seleccionado ? ' selected' : '';
     const extra = dataPrecios ? ` (${gs(dataPrecios[v] || 0)}/hora)` : '';
     return `<option value="${v}"${dp}${sel}>${esc(etiquetas[v] || v)}${extra}</option>`;
+  }).join('');
+}
+
+function opcionesEspacio(precios, unidades) {
+  return TIPOS_ESPACIO.map((t) => {
+    const u = unidades[t] || UNIDAD_DEFECTO[t] || 'hora';
+    const precio = precios[t] || 0;
+    return `<option value="${t}" data-precio="${precio}" data-unidad="${u}">` +
+      `${esc(ETIQUETAS_ESPACIO[t] || t)} (${gs(precio)} por ${UNIDAD_SINGULAR[u]})</option>`;
   }).join('');
 }
 
@@ -349,10 +527,22 @@ app.get('/dashboard', requiereLogin, async (c) => {
   const user = c.get('user');
   const hoy = fechaHoy();
   const caja = c.get('cajaActual');
-  const totalAlq = await totalAlquileresDia(c.env, hoy);
-  const totalKio = await totalKioscoDia(c.env, hoy);
+  // Con la caja abierta mostramos el turno completo (aunque cruce la medianoche).
+  // Sin caja abierta no hay turno, asi que caemos al dia calendario.
+  let totalAlq, totalKio, etiquetaTotales;
+  if (caja) {
+    const rc = await resumenCaja(c.env, caja.id);
+    totalAlq = rc.alqTotal;
+    totalKio = rc.kioTotal;
+    etiquetaTotales = 'Turno actual';
+  } else {
+    totalAlq = await totalAlquileresDia(c.env, hoy);
+    totalKio = await totalKioscoDia(c.env, hoy);
+    etiquetaTotales = 'Ventas de hoy';
+  }
   const totalDia = totalAlq + totalKio;
   const alertas = await productosStockBajo(c.env);
+  const pendientes = await cajasConArqueoPendiente(c.env);
 
   const accesos = [
     `<a href="/alquileres" class="acceso"><span class="acceso-icono">🏐</span><span>Registrar alquiler</span></a>`,
@@ -369,15 +559,24 @@ app.get('/dashboard', requiereLogin, async (c) => {
   <div class="alerta-item"><span>${esc(p.nombre)}</span><span class="alerta-cantidad">${p.stock} en stock (mínimo ${p.stock_minimo})</span></div>`).join('')}
 </section>` : '';
 
+  const pendientesHtml = pendientes.length ? `
+<section class="panel panel-naranja aviso-arqueo">
+  <strong>⏰ ${pendientes.length === 1 ? 'Hay una caja cerrada sin arqueo' : 'Hay ' + pendientes.length + ' cajas cerradas sin arqueo'}</strong>
+  <p class="ayuda-texto">Se cerraron solas de madrugada. Falta cargar cuánto efectivo había para saber si cuadraron.</p>
+  ${pendientes.map((k) => `<a href="/caja/${k.id}" class="btn btn-chico btn-naranja">Cargar arqueo de la caja #${k.id} (${fmtFechaHora(k.fecha_apertura)})</a>`).join(' ')}
+</section>` : '';
+
   return c.html(layout(c, { title: 'Dashboard · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Hola, ${esc(user.nombre)} 👋</h1>
+${pendientesHtml}
 <p class="subtitulo-pagina">${fmtFecha(hoy)}</p>
 <section class="tarjetas-resumen">
-  <div class="tarjeta tarjeta-verde"><span class="tarjeta-etiqueta">Ventas de hoy</span><span class="tarjeta-monto">${gs(totalDia)}</span></div>
+  <div class="tarjeta tarjeta-verde"><span class="tarjeta-etiqueta">${etiquetaTotales}</span><span class="tarjeta-monto">${gs(totalDia)}</span></div>
   <div class="tarjeta"><span class="tarjeta-etiqueta">Alquileres</span><span class="tarjeta-monto">${gs(totalAlq)}</span></div>
   <div class="tarjeta"><span class="tarjeta-etiqueta">Kiosco</span><span class="tarjeta-monto">${gs(totalKio)}</span></div>
   <div class="tarjeta ${caja ? 'tarjeta-naranja' : 'tarjeta-gris'}"><span class="tarjeta-etiqueta">Caja</span>
     <span class="tarjeta-monto">${caja ? 'Abierta' : 'Cerrada'}</span>
+    ${caja ? `<span class="tarjeta-subtexto">Desde ${fmtFechaHora(caja.fecha_apertura)}</span>` : ''}
     ${caja ? `<span class="tarjeta-subtexto">Inicial: ${gs(caja.monto_inicial)}</span>` : ''}
   </div>
 </section>
@@ -387,30 +586,105 @@ ${alertasHtml}` }));
 });
 
 // -------------------- CAJA --------------------
+// Bloque de arqueo reutilizable (se usa en /caja, /caja/cerrar y /caja/:id)
+function bloqueArqueo(caja, r, { titulo = 'Arqueo de caja' } = {}) {
+  const esp = efectivoEsperado(caja, r);
+  return `
+<h2 class="titulo-seccion">${esc(titulo)}</h2>
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Monto inicial (efectivo)</span><strong>${gs(caja.monto_inicial)}</strong></div>
+  <div class="resumen-fila"><span>Alquileres (${r.alqCant})</span><strong>${gs(r.alqTotal)}</strong></div>
+  <div class="resumen-fila"><span>Kiosco (${r.kioCant})</span><strong>${gs(r.kioTotal)}</strong></div>
+  <div class="resumen-fila resumen-total"><span>Total facturado</span><strong>${gs(r.totalGeneral)}</strong></div>
+</div>
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Cobrado en efectivo</span><strong>${gs(r.porMetodo.efectivo)}</strong></div>
+  <div class="resumen-fila"><span>Cobrado por transferencia</span><strong>${gs(r.porMetodo.transferencia)}</strong></div>
+  ${r.porMetodo.tarjeta > 0 ? `<div class="resumen-fila"><span>Cobrado con tarjeta</span><strong>${gs(r.porMetodo.tarjeta)}</strong></div>` : ''}
+  <div class="resumen-fila"><span>Otros ingresos en efectivo</span><strong>${gs(r.ingresos)}</strong></div>
+  <div class="resumen-fila"><span>Egresos / retiros en efectivo</span><strong class="texto-rojo">${gs(-r.egresos)}</strong></div>
+  <div class="resumen-fila resumen-esperado"><span>Efectivo que debe haber en caja</span><strong>${gs(esp)}</strong></div>
+</div>
+<p class="ayuda-texto">Las transferencias no entran en el conteo de efectivo: no pasan por la caja.</p>`;
+}
+
 app.get('/caja', requiereLogin, async (c) => {
   c.set('seccion', 'caja');
   const caja = c.get('cajaActual');
-  let apertura = '';
-  if (caja) {
-    const ua = caja.usuario_apertura_id ? await first(c.env, 'SELECT nombre FROM usuarios WHERE id=?', caja.usuario_apertura_id) : null;
-    apertura = `
+  if (!caja) {
+    return c.html(layout(c, { title: 'Caja · Tercer Tiempo', body: `
+<h1 class="titulo-pagina">Caja</h1>
+<div class="panel panel-gris"><h2>No hay una caja abierta</h2>
+  <p>Abrí la caja para empezar a registrar ventas del día.</p>
+  <a href="/caja/abrir" class="btn btn-primario btn-grande">Abrir caja</a>
+</div>
+<a href="/caja/historial" class="link-secundario">Ver historial de aperturas y cierres →</a>` }));
+  }
+
+  const ua = caja.usuario_apertura_id ? await first(c.env, 'SELECT nombre FROM usuarios WHERE id=?', caja.usuario_apertura_id) : null;
+  const r = await resumenCaja(c.env, caja.id);
+  const movs = await movimientosDeCaja(c.env, caja.id);
+  const filasMov = movs.length ? movs.map((m) => `<tr>
+      <td>${fmtFechaHora(m.fecha)}</td>
+      <td><span class="etiqueta ${m.tipo === 'egreso' ? 'etiqueta-roja' : 'etiqueta-verde'}">${m.tipo === 'egreso' ? 'Egreso' : 'Ingreso'}</span></td>
+      <td>${esc(m.concepto || '-')}</td>
+      <td class="${m.tipo === 'egreso' ? 'texto-rojo' : 'texto-verde'}">${gs(m.monto)}</td>
+      <td>${esc(m.usuario || '-')}</td>
+      <td class="acciones-tabla"><form method="post" action="/caja/movimiento/${m.id}/eliminar" onsubmit="return confirm('¿Eliminar este movimiento?');" class="form-inline">
+        <button type="submit" class="btn btn-chico btn-peligro">Eliminar</button></form></td>
+    </tr>`).join('') : `<tr><td colspan="6" class="tabla-vacia">Sin movimientos de efectivo en esta caja.</td></tr>`;
+
+  return c.html(layout(c, { title: 'Caja · Tercer Tiempo', body: `
+<h1 class="titulo-pagina">Caja</h1>
 <div class="panel panel-verde"><h2>Caja abierta</h2>
   <p>Apertura: ${fmtFechaHora(caja.fecha_apertura)}</p>
   <p>Monto inicial: <strong>${gs(caja.monto_inicial)}</strong></p>
   <p>Responsable: ${esc(ua ? ua.nombre : '-')}</p>
   <a href="/caja/cerrar" class="btn btn-naranja btn-grande">Cerrar caja</a>
-</div>`;
-  } else {
-    apertura = `
-<div class="panel panel-gris"><h2>No hay una caja abierta</h2>
-  <p>Abrí la caja para empezar a registrar ventas del día.</p>
-  <a href="/caja/abrir" class="btn btn-primario btn-grande">Abrir caja</a>
-</div>`;
-  }
-  return c.html(layout(c, { title: 'Caja · Tercer Tiempo', body: `
-<h1 class="titulo-pagina">Caja</h1>
-${apertura}
+</div>
+${bloqueArqueo(caja, r, { titulo: 'Arqueo parcial (en vivo)' })}
+<h2 class="titulo-seccion">Movimientos de efectivo</h2>
+<form method="post" action="/caja/movimiento" class="formulario formulario-tarjeta">
+  <div class="formulario-fila">
+    <div><label for="tipo">Tipo</label>
+      <select id="tipo" name="tipo">
+        <option value="egreso">Egreso / retiro</option>
+        <option value="ingreso">Ingreso extra</option>
+      </select></div>
+    <div><label for="monto">Monto (₲)</label>
+      <input type="text" inputmode="numeric" id="monto" name="monto" class="input-monto" placeholder="0" required></div>
+  </div>
+  <label for="concepto">Concepto</label>
+  <input type="text" id="concepto" name="concepto" placeholder="Ej: compra de hielo, retiro del dueño, vuelto extra" required>
+  <button type="submit" class="btn btn-secundario">Registrar movimiento</button>
+</form>
+<div class="tabla-envoltorio"><table class="tabla">
+  <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Monto</th><th>Usuario</th><th>Acciones</th></tr></thead>
+  <tbody>${filasMov}</tbody>
+</table></div>
 <a href="/caja/historial" class="link-secundario">Ver historial de aperturas y cierres →</a>` }));
+});
+
+app.post('/caja/movimiento', requiereLogin, async (c) => {
+  const caja = c.get('cajaActual');
+  if (!caja) { addFlash(c, 'error', 'No hay una caja abierta.'); return irA(c, '/caja'); }
+  const b = await c.req.parseBody();
+  const tipo = String(b.tipo || 'egreso') === 'ingreso' ? 'ingreso' : 'egreso';
+  const monto = aEntero(b.monto);
+  const concepto = String(b.concepto || '').trim();
+  if (monto <= 0) { addFlash(c, 'error', 'El monto tiene que ser mayor a cero.'); return irA(c, '/caja'); }
+  await run(c.env, 'INSERT INTO movimientos_caja (caja_id, tipo, concepto, monto, fecha, usuario_id) VALUES (?,?,?,?,?,?)',
+    caja.id, tipo, concepto, monto, ahoraTS(), c.get('user').id);
+  addFlash(c, 'exito', tipo === 'egreso' ? 'Egreso registrado.' : 'Ingreso registrado.');
+  return irA(c, '/caja');
+});
+
+app.post('/caja/movimiento/:id/eliminar', requiereLogin, async (c) => {
+  const caja = c.get('cajaActual');
+  if (!caja) { addFlash(c, 'error', 'No hay una caja abierta.'); return irA(c, '/caja'); }
+  await run(c.env, 'DELETE FROM movimientos_caja WHERE id=? AND caja_id=?', Number(c.req.param('id')), caja.id);
+  addFlash(c, 'exito', 'Movimiento eliminado.');
+  return irA(c, '/caja');
 });
 
 app.get('/caja/abrir', requiereLogin, async (c) => {
@@ -439,28 +713,17 @@ app.get('/caja/cerrar', requiereLogin, async (c) => {
   c.set('seccion', 'caja');
   const caja = c.get('cajaActual');
   if (!caja) { addFlash(c, 'error', 'No hay ninguna caja abierta para cerrar.'); return irA(c, '/caja'); }
-  const hoy = fechaHoy();
-  const totalAlq = await totalAlquileresDia(c.env, hoy);
-  const totalKio = await totalKioscoDia(c.env, hoy);
-  const totalGen = totalAlq + totalKio;
-  const met = await totalesPorMetodoDia(c.env, hoy);
-  const esperado = caja.monto_inicial + met.ef;
+  const r = await resumenCaja(c.env, caja.id);
+  const esperado = efectivoEsperado(caja, r);
   return c.html(layout(c, { title: 'Cerrar caja · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Cerrar caja</h1>
-<div class="panel panel-resumen">
-  <div class="resumen-fila"><span>Monto inicial (efectivo)</span><strong>${gs(caja.monto_inicial)}</strong></div>
-  <div class="resumen-fila"><span>Ventas por alquileres</span><strong>${gs(totalAlq)}</strong></div>
-  <div class="resumen-fila"><span>Ventas de kiosco</span><strong>${gs(totalKio)}</strong></div>
-  <div class="resumen-fila resumen-total"><span>Total general</span><strong>${gs(totalGen)}</strong></div>
-  <div class="resumen-fila"><span>💵 Cobrado en efectivo</span><strong>${gs(met.ef)}</strong></div>
-  <div class="resumen-fila"><span>🏦 Cobrado por transferencia</span><strong>${gs(met.tr)}</strong></div>
-  ${met.ta ? `<div class="resumen-fila"><span>💳 Cobrado con tarjeta</span><strong>${gs(met.ta)}</strong></div>` : ''}
-  <div class="resumen-fila resumen-esperado"><span>Efectivo esperado en caja</span><strong>${gs(esperado)}</strong></div>
-</div>
-<form method="post" action="/caja/cerrar" class="formulario">
-  <label for="monto_contado">Monto real contado en caja</label>
+${bloqueArqueo(caja, r)}
+<form method="post" action="/caja/cerrar" class="formulario formulario-tarjeta">
+  <label for="monto_contado">Efectivo real contado en caja</label>
   <input type="text" inputmode="numeric" id="monto_contado" name="monto_contado" class="input-monto" placeholder="0" data-esperado="${esperado}" required>
   <p class="ayuda-texto" id="diferencia-preview"></p>
+  <label for="observaciones">Observaciones (opcional)</label>
+  <input type="text" id="observaciones" name="observaciones" placeholder="Ej: faltó vuelto de una mesa">
   <button type="submit" class="btn btn-naranja btn-grande">Confirmar cierre</button>
 </form>` }));
 });
@@ -469,19 +732,40 @@ app.post('/caja/cerrar', requiereLogin, async (c) => {
   const caja = c.get('cajaActual');
   if (!caja) { addFlash(c, 'error', 'No hay ninguna caja abierta para cerrar.'); return irA(c, '/caja'); }
   const b = await c.req.parseBody();
-  const hoy = fechaHoy();
-  const totalAlq = await totalAlquileresDia(c.env, hoy);
-  const totalKio = await totalKioscoDia(c.env, hoy);
-  const totalGen = totalAlq + totalKio;
-  const met = await totalesPorMetodoDia(c.env, hoy);
-  const esperado = caja.monto_inicial + met.ef;
+  const r = await resumenCaja(c.env, caja.id);
+  const esperado = efectivoEsperado(caja, r);
   const contado = aEntero(b.monto_contado);
   await run(c.env,
-    `UPDATE cajas SET total_alquileres=?, total_kiosco=?, total_general=?, total_efectivo=?, total_transferencia=?, total_tarjeta=?, monto_esperado=?, monto_contado=?, diferencia=?,
+    `UPDATE cajas SET total_alquileres=?, total_kiosco=?, total_general=?,
+     total_efectivo=?, total_transferencia=?, total_tarjeta=?, total_egresos=?, total_ingresos_extra=?,
+     costo_kiosco=?, monto_esperado=?, monto_contado=?, diferencia=?, observaciones=?,
      estado='cerrada', fecha_cierre=?, usuario_cierre_id=? WHERE id=?`,
-    totalAlq, totalKio, totalGen, met.ef, met.tr, met.ta, esperado, contado, contado - esperado, ahoraTS(), c.get('user').id, caja.id);
-  addFlash(c, 'exito', 'Caja cerrada correctamente.');
-  return irA(c, '/caja/historial');
+    r.alqTotal, r.kioTotal, r.totalGeneral,
+    r.porMetodo.efectivo, r.porMetodo.transferencia, r.porMetodo.tarjeta, r.egresos, r.ingresos,
+    r.costoKiosco, esperado, contado, contado - esperado, String(b.observaciones || '').trim(),
+    ahoraTS(), c.get('user').id, caja.id);
+  const dif = contado - esperado;
+  addFlash(c, dif === 0 ? 'exito' : 'error',
+    dif === 0 ? 'Caja cerrada: cerró exacta.' : (dif > 0 ? `Caja cerrada con un sobrante de ${gs(dif)}.` : `Caja cerrada con un faltante de ${gs(Math.abs(dif))}.`));
+  return irA(c, '/caja/' + caja.id);
+});
+
+// Carga el conteo de una caja que se cerro sola, y recien ahi calcula la diferencia.
+app.post('/caja/:id/arqueo', requiereLogin, async (c) => {
+  const id = Number(c.req.param('id'));
+  const caja = Number.isNaN(id) ? null : await first(c.env, 'SELECT * FROM cajas WHERE id=?', id);
+  if (!caja) { addFlash(c, 'error', 'No se encontró esa caja.'); return irA(c, '/caja/historial'); }
+  if (!arqueoPendiente(caja)) { addFlash(c, 'error', 'Esa caja ya tiene el arqueo cargado.'); return irA(c, '/caja/' + id); }
+  const b = await c.req.parseBody();
+  const contado = aEntero(b.monto_contado);
+  const esperado = caja.monto_esperado || 0;
+  const dif = contado - esperado;
+  const obs = [String(caja.observaciones || '').trim(), String(b.observaciones || '').trim()].filter(Boolean).join(' ');
+  await run(c.env, 'UPDATE cajas SET monto_contado=?, diferencia=?, usuario_cierre_id=?, observaciones=? WHERE id=?',
+    contado, dif, c.get('user').id, obs, id);
+  addFlash(c, dif === 0 ? 'exito' : 'error',
+    dif === 0 ? 'Arqueo cargado: la caja cerró exacta.' : (dif > 0 ? `Arqueo cargado: sobrante de ${gs(dif)}.` : `Arqueo cargado: faltante de ${gs(Math.abs(dif))}.`));
+  return irA(c, '/caja/' + id);
 });
 
 app.get('/caja/historial', requiereLogin, async (c) => {
@@ -493,37 +777,149 @@ app.get('/caja/historial', requiereLogin, async (c) => {
     return `<tr>
       <td>${fmtFechaHora(k.fecha_apertura)}</td>
       <td>${k.fecha_cierre ? fmtFechaHora(k.fecha_cierre) : '-'}</td>
-      <td><span class="etiqueta ${k.estado === 'abierta' ? 'etiqueta-verde' : 'etiqueta-gris'}">${k.estado === 'abierta' ? 'Abierta' : 'Cerrada'}</span></td>
+      <td>${k.estado === 'abierta'
+        ? '<span class="etiqueta etiqueta-verde">Abierta</span>'
+        : (arqueoPendiente(k) ? '<span class="etiqueta etiqueta-naranja">Sin arqueo</span>' : '<span class="etiqueta etiqueta-gris">Cerrada</span>')}</td>
       <td>${gs(k.monto_inicial)}</td>
       <td>${gs(k.total_general || 0)}</td>
+      <td>${gs(k.total_efectivo || 0)}</td>
       <td>${gs(k.monto_esperado || 0)}</td>
       <td>${k.monto_contado === null || k.monto_contado === undefined ? '-' : gs(k.monto_contado)}</td>
       <td class="${claseDif}">${dif === null || dif === undefined ? '-' : gs(dif)}</td>
+      <td><a href="/caja/${k.id}" class="btn btn-chico btn-secundario">Ver arqueo</a></td>
     </tr>`;
-  }).join('') : `<tr><td colspan="8" class="tabla-vacia">Todavía no hay registros de caja.</td></tr>`;
+  }).join('') : `<tr><td colspan="10" class="tabla-vacia">Todavía no hay registros de caja.</td></tr>`;
   return c.html(layout(c, { title: 'Historial de caja · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Historial de caja</h1>
 <div class="tabla-envoltorio"><table class="tabla">
-  <thead><tr><th>Apertura</th><th>Cierre</th><th>Estado</th><th>Monto inicial</th><th>Total general</th><th>Esperado</th><th>Contado</th><th>Diferencia</th></tr></thead>
+  <thead><tr><th>Apertura</th><th>Cierre</th><th>Estado</th><th>Inicial</th><th>Facturado</th><th>Efectivo</th><th>Esperado</th><th>Contado</th><th>Diferencia</th><th></th></tr></thead>
   <tbody>${filas}</tbody>
 </table></div>` }));
+});
+
+// Arqueo detallado de una caja (imprimible). Va DESPUES de /caja/abrir, /cerrar e /historial.
+app.get('/caja/:id', requiereLogin, async (c) => {
+  c.set('seccion', 'caja');
+  const id = Number(c.req.param('id'));
+  const caja = Number.isNaN(id) ? null : await first(c.env, 'SELECT * FROM cajas WHERE id=?', id);
+  if (!caja) { addFlash(c, 'error', 'No se encontró esa caja.'); return irA(c, '/caja/historial'); }
+
+  const r = await resumenCaja(c.env, caja.id);
+  const esperado = caja.estado === 'cerrada' ? (caja.monto_esperado || 0) : efectivoEsperado(caja, r);
+  const contado = caja.monto_contado;
+  const dif = caja.diferencia;
+  const ua = caja.usuario_apertura_id ? await first(c.env, 'SELECT nombre FROM usuarios WHERE id=?', caja.usuario_apertura_id) : null;
+  const uc = caja.usuario_cierre_id ? await first(c.env, 'SELECT nombre FROM usuarios WHERE id=?', caja.usuario_cierre_id) : null;
+  const movs = await movimientosDeCaja(c.env, caja.id);
+  const alqs = await alquileresDeCaja(c.env, caja.id);
+  const vtas = await ventasDeCaja(c.env, caja.id);
+
+  const filasMov = movs.length ? movs.map((m) => `<tr>
+      <td>${fmtFechaHora(m.fecha)}</td>
+      <td>${m.tipo === 'egreso' ? 'Egreso' : 'Ingreso'}</td>
+      <td>${esc(m.concepto || '-')}</td>
+      <td class="${m.tipo === 'egreso' ? 'texto-rojo' : 'texto-verde'}">${gs(m.tipo === 'egreso' ? -m.monto : m.monto)}</td>
+      <td>${esc(m.usuario || '-')}</td></tr>`).join('')
+    : `<tr><td colspan="5" class="tabla-vacia">Sin movimientos de efectivo.</td></tr>`;
+
+  const filasAlq = alqs.length ? alqs.map((a) => `<tr>
+      <td>${fmtFechaHora(a.fecha_registro)}</td>
+      <td>${esc(ETIQUETAS_ESPACIO[a.tipo_espacio] || a.tipo_espacio)}</td>
+      <td>${esc(a.cliente || '-')}</td>
+      <td>${fmtCantidad(a.duracion_horas, a.unidad)}</td>
+      <td>${fmtPago(a)}</td>
+      <td>${gs(a.total)}</td></tr>`).join('')
+    : `<tr><td colspan="6" class="tabla-vacia">Sin alquileres en esta caja.</td></tr>`;
+
+  const filasVta = vtas.length ? vtas.map((v) => `<tr>
+      <td>#${v.id}</td>
+      <td>${fmtFechaHora(v.fecha)}</td>
+      <td>${fmtPago(v)}</td>
+      <td>${gs(v.total)}</td></tr>`).join('')
+    : `<tr><td colspan="4" class="tabla-vacia">Sin ventas de kiosco en esta caja.</td></tr>`;
+
+  const bloqueCierre = arqueoPendiente(caja) ? `
+<div class="panel panel-resumen">
+  <div class="resumen-fila resumen-total"><span>Efectivo esperado</span><strong>${gs(esperado)}</strong></div>
+</div>
+<div class="panel panel-naranja">
+  <strong>⏰ Arqueo pendiente</strong>
+  <p class="ayuda-texto">Esta caja se cerró sola el ${fmtFechaHora(caja.fecha_cierre)} porque quedó abierta.
+  Los totales ya están congelados; falta cargar cuánto efectivo había realmente.</p>
+  <form method="post" action="/caja/${caja.id}/arqueo" class="formulario no-imprimir">
+    <label for="monto_contado">Efectivo real que había en caja</label>
+    <input type="text" inputmode="numeric" id="monto_contado" name="monto_contado" class="input-monto" placeholder="0" data-esperado="${esperado}" required>
+    <p class="ayuda-texto" id="diferencia-preview"></p>
+    <label for="observaciones">Observaciones (opcional)</label>
+    <input type="text" id="observaciones" name="observaciones" placeholder="Ej: quedó el vuelto de una mesa">
+    <button type="submit" class="btn btn-naranja btn-grande">Guardar arqueo</button>
+  </form>
+</div>
+${caja.observaciones ? `<p class="ayuda-texto">Observaciones: ${esc(caja.observaciones)}</p>` : ''}`
+    : caja.estado === 'cerrada' ? `
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Efectivo esperado</span><strong>${gs(esperado)}</strong></div>
+  <div class="resumen-fila"><span>Efectivo contado</span><strong>${gs(contado || 0)}</strong></div>
+  <div class="resumen-fila resumen-total"><span>${dif === 0 ? 'Cerró exacta' : (dif > 0 ? 'Sobrante' : 'Faltante')}</span>
+    <strong class="${dif === 0 ? '' : (dif > 0 ? 'texto-verde' : 'texto-rojo')}">${gs(dif || 0)}</strong></div>
+</div>
+${caja.observaciones ? `<p class="ayuda-texto">Observaciones: ${esc(caja.observaciones)}</p>` : ''}
+<p class="ayuda-texto">Cerrada el ${fmtFechaHora(caja.fecha_cierre)} por ${esc(uc ? uc.nombre : '-')}.</p>`
+    : `<p class="ayuda-texto">Esta caja todavía está abierta: los totales son parciales.</p>`;
+
+  return c.html(layout(c, { title: `Arqueo de caja #${caja.id} · Tercer Tiempo`, body: `
+<div class="cabecera-con-boton">
+  <h1 class="titulo-pagina">Arqueo de caja #${caja.id}</h1>
+  <div class="botones-cabecera no-imprimir">
+    <button onclick="window.print()" class="btn btn-secundario">🖨 Imprimir</button>
+    <a href="/caja/historial" class="btn btn-secundario">← Historial</a>
+  </div>
+</div>
+<p class="ayuda-texto">Apertura: ${fmtFechaHora(caja.fecha_apertura)} · Responsable: ${esc(ua ? ua.nombre : '-')} ·
+  <span class="etiqueta ${caja.estado === 'abierta' ? 'etiqueta-verde' : 'etiqueta-gris'}">${caja.estado === 'abierta' ? 'Abierta' : 'Cerrada'}</span></p>
+${bloqueArqueo(caja, r, { titulo: 'Detalle del arqueo' })}
+<h2 class="titulo-seccion">Cierre</h2>
+${bloqueCierre}
+<h2 class="titulo-seccion">Ganancia del kiosco</h2>
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Venta de productos</span><strong>${gs(r.kioTotal)}</strong></div>
+  <div class="resumen-fila"><span>Costo de la mercadería vendida</span><strong class="texto-rojo">${gs(-r.costoKiosco)}</strong></div>
+  <div class="resumen-fila resumen-total"><span>Ganancia bruta</span><strong class="texto-verde">${gs(r.utilidadKiosco)}</strong></div>
+</div>
+<h2 class="titulo-seccion">Movimientos de efectivo</h2>
+<div class="tabla-envoltorio"><table class="tabla">
+  <thead><tr><th>Fecha</th><th>Tipo</th><th>Concepto</th><th>Monto</th><th>Usuario</th></tr></thead>
+  <tbody>${filasMov}</tbody></table></div>
+<h2 class="titulo-seccion">Alquileres</h2>
+<div class="tabla-envoltorio"><table class="tabla">
+  <thead><tr><th>Fecha</th><th>Espacio</th><th>Cliente</th><th>Cantidad</th><th>Pago</th><th>Total</th></tr></thead>
+  <tbody>${filasAlq}</tbody></table></div>
+<h2 class="titulo-seccion">Ventas de kiosco</h2>
+<div class="tabla-envoltorio"><table class="tabla">
+  <thead><tr><th>Venta</th><th>Fecha</th><th>Pago</th><th>Total</th></tr></thead>
+  <tbody>${filasVta}</tbody></table></div>` }));
 });
 
 // -------------------- ALQUILERES --------------------
 app.get('/alquileres', requiereLogin, async (c) => {
   c.set('seccion', 'alquileres');
   const caja = c.get('cajaActual');
-  const preciosRows = await all(c.env, 'SELECT tipo_espacio, precio_hora FROM precios_espacio');
-  const precios = {};
-  for (const p of preciosRows) precios[p.tipo_espacio] = p.precio_hora;
-  const alquileresHoy = await alquileresDelDia(c.env, fechaHoy());
+  const preciosRows = await all(c.env, 'SELECT tipo_espacio, precio_hora, unidad FROM precios_espacio');
+  const precios = {}, unidades = {};
+  for (const p of preciosRows) {
+    precios[p.tipo_espacio] = p.precio_hora;
+    unidades[p.tipo_espacio] = UNIDADES.includes(p.unidad) ? p.unidad : (UNIDAD_DEFECTO[p.tipo_espacio] || 'hora');
+  }
+  // Misma logica que el dashboard: con la caja abierta listamos el turno entero.
+  const alquileresHoy = caja ? await alquileresDeTurno(c.env, caja.id) : await alquileresDelDia(c.env, fechaHoy());
+  const tituloLista = caja ? 'Alquileres del turno' : 'Alquileres de hoy';
   const totalHoy = alquileresHoy.reduce((s, a) => s + a.total, 0);
 
   const avisoCaja = !caja ? `<div class="aviso-caja">⚠️ La caja está cerrada. <a href="/caja/abrir">Abrila</a> para poder registrar alquileres.</div>` : '';
   const filas = alquileresHoy.length ? alquileresHoy.map((a) => `<tr>
     <td>${esc(a.hora_inicio)}</td><td>${esc(ETIQUETAS_ESPACIO[a.tipo_espacio] || a.tipo_espacio)}</td>
-    <td>${esc(a.cliente || '-')}</td><td>${a.duracion_horas} h</td><td>${gs(a.total)}</td>
-    <td>${esc(ETIQUETAS_PAGO[a.metodo_pago] || a.metodo_pago)}</td></tr>`).join('')
+    <td>${esc(a.cliente || '-')}</td><td>${fmtCantidad(a.duracion_horas, a.unidad)}</td><td>${gs(a.total)}</td>
+    <td>${fmtPago(a)}</td></tr>`).join('')
     : `<tr><td colspan="6" class="tabla-vacia">Todavía no hay alquileres registrados hoy.</td></tr>`;
 
   return c.html(layout(c, { title: 'Alquileres · Tercer Tiempo', body: `
@@ -531,26 +927,22 @@ app.get('/alquileres', requiereLogin, async (c) => {
 ${avisoCaja}
 <form method="post" action="/alquileres/nuevo" class="formulario formulario-tarjeta">
   <label for="tipo_espacio">Espacio</label>
-  <select id="tipo_espacio" name="tipo_espacio" required>${opciones(TIPOS_ESPACIO, ETIQUETAS_ESPACIO, null, precios)}</select>
+  <select id="tipo_espacio" name="tipo_espacio" required>${opcionesEspacio(precios, unidades)}</select>
   <label for="cliente">Cliente / equipo (opcional)</label>
   <input type="text" id="cliente" name="cliente" placeholder="Nombre del cliente o equipo">
   <div class="formulario-fila">
     <div><label for="hora_inicio">Hora de inicio</label><input type="time" id="hora_inicio" name="hora_inicio" required></div>
-    <div><label for="duracion_horas">Duración (horas)</label><input type="number" id="duracion_horas" name="duracion_horas" min="0.5" step="0.5" value="1" required></div>
+    <div><label for="duracion_horas" id="label-cantidad">Cantidad</label><input type="number" id="duracion_horas" name="duracion_horas" min="1" step="1" value="1" required></div>
   </div>
   <label for="metodo_pago">Método de pago</label>
-  <select id="metodo_pago" name="metodo_pago">${opcionesPago(null)}</select>
-  <div class="campo-mixto" style="display:none">
-    <label for="monto_efectivo">¿Cuánto paga en efectivo?</label>
-    <input type="text" inputmode="numeric" id="monto_efectivo" name="monto_efectivo" placeholder="0">
-    <p class="ayuda-texto resto-transferencia"></p>
-  </div>
+  <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_FORM, ETIQUETAS_PAGO, null)}</select>
+  ${BLOQUE_MIXTO}
   <div class="total-preview">Total: <span id="total-alquiler">${gs(0)}</span></div>
   <button type="submit" class="btn btn-primario btn-grande" ${caja ? '' : 'disabled'}>Registrar alquiler</button>
 </form>
-<h2 class="titulo-seccion">Hoy · Total ${gs(totalHoy)}</h2>
+<h2 class="titulo-seccion">${tituloLista} · Total ${gs(totalHoy)}</h2>
 <div class="tabla-envoltorio"><table class="tabla">
-  <thead><tr><th>Hora</th><th>Espacio</th><th>Cliente</th><th>Duración</th><th>Total</th><th>Pago</th></tr></thead>
+  <thead><tr><th>Hora</th><th>Espacio</th><th>Cliente</th><th>Cantidad</th><th>Total</th><th>Pago</th></tr></thead>
   <tbody>${filas}</tbody>
 </table></div>` }));
 });
@@ -563,18 +955,21 @@ app.post('/alquileres/nuevo', requiereLogin, async (c) => {
   if (!TIPOS_ESPACIO.includes(tipo)) { addFlash(c, 'error', 'Tipo de espacio inválido.'); return irA(c, '/alquileres'); }
   const cliente = String(b.cliente || '').trim();
   let horaInicio = String(b.hora_inicio || '').trim();
-  let metodo = String(b.metodo_pago || 'efectivo');
-  if (!METODOS_PAGO_OPCIONES.includes(metodo)) metodo = 'efectivo';
-  let dur = parseFloat(String(b.duracion_horas || '1').replace(',', '.'));
-  if (Number.isNaN(dur) || dur <= 0) dur = 1.0;
-  const pc = await first(c.env, 'SELECT precio_hora FROM precios_espacio WHERE tipo_espacio=?', tipo);
-  const precioHora = pc ? pc.precio_hora : 0;
-  const total = Math.round(precioHora * dur);
-  const dp = desglosePago(metodo, total, aEntero(b.monto_efectivo));
+  const pc = await first(c.env, 'SELECT precio_hora, unidad FROM precios_espacio WHERE tipo_espacio=?', tipo);
+  const precioUnitario = pc ? pc.precio_hora : 0;
+  const unidad = pc && UNIDADES.includes(pc.unidad) ? pc.unidad : (UNIDAD_DEFECTO[tipo] || 'hora');
+  let cant = parseFloat(String(b.duracion_horas || '1').replace(',', '.'));
+  if (Number.isNaN(cant) || cant <= 0) cant = 1;
+  // Los juegos y las fichas se cuentan de a uno; solo las horas admiten medias horas
+  if (unidad !== 'hora') cant = Math.max(1, Math.round(cant));
+  const total = Math.round(precioUnitario * cant);
+  const pago = repartoPago(b, total);
+  if (pago.error) { addFlash(c, 'error', pago.error); return irA(c, '/alquileres'); }
   await run(c.env,
-    `INSERT INTO alquileres (caja_id, tipo_espacio, cliente, fecha, hora_inicio, duracion_horas, precio_hora, total, metodo_pago, monto_efectivo, monto_transferencia, monto_tarjeta, usuario_id, fecha_registro)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    caja.id, tipo, cliente, fechaHoy(), horaInicio || horaActual(), dur, precioHora, total, dp.metodo, dp.ef, dp.tr, dp.ta, c.get('user').id, ahoraTS());
+    `INSERT INTO alquileres (caja_id, tipo_espacio, cliente, fecha, hora_inicio, duracion_horas, unidad, precio_hora, total, metodo_pago, pago_efectivo, pago_transferencia, pago_tarjeta, usuario_id, fecha_registro)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    caja.id, tipo, cliente, fechaHoy(), horaInicio || horaActual(), cant, unidad, precioUnitario, total, pago.metodo,
+    pago.efectivo, pago.transferencia, pago.tarjeta, c.get('user').id, ahoraTS());
   addFlash(c, 'exito', 'Alquiler registrado correctamente.');
   return irA(c, '/alquileres');
 });
@@ -593,17 +988,14 @@ app.get('/kiosco', requiereLogin, async (c) => {
       html += `<h2 class="titulo-seccion">${esc(ETIQUETAS_CATEGORIA[p.categoria] || p.categoria)}</h2><div class="grilla-productos">`;
       categoriaActual = p.categoria; abierto = true;
     }
-    const promoBadge = (p.cantidad_promo > 1 && p.precio_promo > 0)
-      ? `<div class="producto-promo">🏷️ ${p.cantidad_promo} x ${gs(p.precio_promo)}</div>` : '';
     html += `
     <div class="producto-card ${p.stock <= 0 ? 'producto-sin-stock' : ''}">
       <div class="producto-nombre">${esc(p.nombre)}</div>
-      <div class="producto-precio">${gs(p.precio_venta)} c/u</div>
-      ${promoBadge}
+      <div class="producto-precio">${gs(p.precio_venta)}</div>
       <div class="producto-stock">Stock: ${p.stock}</div>
       <div class="stepper">
         <button type="button" class="stepper-btn" data-accion="restar">−</button>
-        <input type="number" class="stepper-input" name="cantidad" value="0" min="0" max="${p.stock}" data-precio="${p.precio_venta}" data-stock="${p.stock}" data-cantpromo="${p.cantidad_promo || 0}" data-preciopromo="${p.precio_promo || 0}" readonly>
+        <input type="number" class="stepper-input" name="cantidad" value="0" min="0" max="${p.stock}" data-precio="${p.precio_venta}" data-stock="${p.stock}" readonly>
         <button type="button" class="stepper-btn" data-accion="sumar">+</button>
       </div>
       <input type="hidden" name="producto_id" value="${p.id}">
@@ -619,12 +1011,8 @@ ${avisoCaja}
   ${html}
   <div class="panel-venta-fija">
     <label for="metodo_pago">Método de pago</label>
-    <select id="metodo_pago" name="metodo_pago">${opcionesPago(null)}</select>
-    <div class="campo-mixto" style="display:none">
-      <label for="monto_efectivo">¿Cuánto paga en efectivo?</label>
-      <input type="text" inputmode="numeric" id="monto_efectivo" name="monto_efectivo" placeholder="0">
-      <p class="ayuda-texto resto-transferencia"></p>
-    </div>
+    <select id="metodo_pago" name="metodo_pago">${opciones(METODOS_FORM, ETIQUETAS_PAGO, null)}</select>
+    ${BLOQUE_MIXTO}
     <div class="total-preview">Total: <span id="total-venta">${gs(0)}</span></div>
     <button type="submit" class="btn btn-primario btn-grande" ${caja ? '' : 'disabled'}>Confirmar venta</button>
   </div>
@@ -635,8 +1023,6 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   const caja = c.get('cajaActual');
   if (!caja) { addFlash(c, 'error', 'Tenés que abrir la caja antes de registrar una venta.'); return irA(c, '/caja/abrir'); }
   const b = await c.req.parseBody({ all: true });
-  let metodo = String(b.metodo_pago || 'efectivo');
-  if (!METODOS_PAGO_OPCIONES.includes(metodo)) metodo = 'efectivo';
   const ids = [].concat(b.producto_id ?? []);
   const cants = [].concat(b.cantidad ?? []);
 
@@ -660,20 +1046,30 @@ app.post('/kiosco/vender', requiereLogin, async (c) => {
   }
 
   let total = 0;
-  for (const [pid, cant] of items) total += precioItem(productos[pid], cant);
-  const dp = desglosePago(metodo, total, aEntero(Array.isArray(b.monto_efectivo) ? b.monto_efectivo[0] : b.monto_efectivo));
+  for (const [pid, cant] of items) total += productos[pid].precio_venta * cant;
+
+  // parseBody({all:true}) puede devolver arrays; para el pago tomamos el primer valor
+  const unico = (v) => (Array.isArray(v) ? v[0] : v);
+  const pago = repartoPago({
+    metodo_pago: unico(b.metodo_pago),
+    pago_efectivo: unico(b.pago_efectivo),
+    pago_transferencia: unico(b.pago_transferencia),
+    pago_tarjeta: unico(b.pago_tarjeta),
+  }, total);
+  if (pago.error) { addFlash(c, 'error', pago.error); return irA(c, '/kiosco'); }
 
   const ts = ahoraTS();
-  const resVenta = await run(c.env, 'INSERT INTO ventas (caja_id, fecha, total, metodo_pago, monto_efectivo, monto_transferencia, monto_tarjeta, usuario_id) VALUES (?,?,?,?,?,?,?,?)',
-    caja.id, ts, total, dp.metodo, dp.ef, dp.tr, dp.ta, c.get('user').id);
+  const resVenta = await run(c.env,
+    'INSERT INTO ventas (caja_id, fecha, total, metodo_pago, pago_efectivo, pago_transferencia, pago_tarjeta, usuario_id) VALUES (?,?,?,?,?,?,?,?)',
+    caja.id, ts, total, pago.metodo, pago.efectivo, pago.transferencia, pago.tarjeta, c.get('user').id);
   const ventaId = resVenta.meta.last_row_id;
 
   const lote = [];
   for (const [pid, cant] of items) {
     const p = productos[pid];
-    const subtotal = precioItem(p, cant);
-    lote.push(c.env.DB.prepare('INSERT INTO venta_detalles (venta_id, producto_id, cantidad, precio_unitario, subtotal) VALUES (?,?,?,?,?)')
-      .bind(ventaId, p.id, cant, p.precio_venta, subtotal));
+    const subtotal = p.precio_venta * cant;
+    lote.push(c.env.DB.prepare('INSERT INTO venta_detalles (venta_id, producto_id, cantidad, precio_unitario, costo_unitario, subtotal) VALUES (?,?,?,?,?,?)')
+      .bind(ventaId, p.id, cant, p.precio_venta, p.precio_costo || 0, subtotal));
     lote.push(c.env.DB.prepare('UPDATE productos SET stock = stock - ? WHERE id=?').bind(cant, p.id));
     lote.push(c.env.DB.prepare('INSERT INTO movimientos_stock (producto_id, tipo, cantidad, motivo, fecha, usuario_id) VALUES (?,?,?,?,?,?)')
       .bind(p.id, 'salida', cant, `Venta #${ventaId}`, ts, c.get('user').id));
@@ -701,15 +1097,41 @@ app.get('/stock', requiereLogin, async (c) => {
       <a href="/stock/${p.id}/editar" class="btn btn-chico btn-secundario">Editar</a>
       <form method="post" action="/stock/${p.id}/eliminar" onsubmit="return confirm('¿Eliminar ${esc(p.nombre).replace(/'/g, "\\'")}?');" class="form-inline">
         <button type="submit" class="btn btn-chico btn-peligro">Eliminar</button></form></td>` : '';
+    const costo = p.precio_costo || 0;
+    const margen = margenPct(p.precio_venta, costo);
+    const ganancia = costo ? p.precio_venta - costo : null;
+    const colsCosto = esAdmin ? `
+      <td>${costo ? gs(costo) : '<span class="ayuda-texto">sin costo</span>'}</td>
+      <td>${margen === null ? '-' : margen + '%'}</td>
+      <td class="${ganancia !== null && ganancia > 0 ? 'texto-verde' : (ganancia !== null && ganancia < 0 ? 'texto-rojo' : '')}">${ganancia === null ? '-' : gs(ganancia)}</td>` : '';
     return `<tr class="${bajo ? 'fila-alerta' : ''}">
       <td>${esc(p.nombre)}</td><td>${esc(ETIQUETAS_CATEGORIA[p.categoria] || p.categoria)}</td>
-      <td>${gs(p.precio_venta)}</td><td>${p.stock}${bajo ? ' ⚠️' : ''}</td><td>${p.stock_minimo}</td>${acciones}</tr>`;
-  }).join('') : `<tr><td colspan="6" class="tabla-vacia">No hay productos cargados.</td></tr>`;
+      <td>${gs(p.precio_venta)}</td>${colsCosto}<td>${p.stock}${bajo ? ' ⚠️' : ''}</td><td>${p.stock_minimo}</td>${acciones}</tr>`;
+  }).join('') : `<tr><td colspan="9" class="tabla-vacia">No hay productos cargados.</td></tr>`;
+
+  const thCosto = esAdmin ? '<th>Precio costo</th><th>Margen</th><th>Ganancia unit.</th>' : '';
+  let valorizacion = '';
+  if (esAdmin) {
+    let valCosto = 0, valVenta = 0, sinCosto = 0;
+    for (const p of productos) {
+      valCosto += (p.precio_costo || 0) * p.stock;
+      valVenta += p.precio_venta * p.stock;
+      if (!p.precio_costo) sinCosto++;
+    }
+    valorizacion = `
+<section class="tarjetas-resumen">
+  <div class="tarjeta"><span class="tarjeta-etiqueta">Stock valorizado a costo</span><span class="tarjeta-monto">${gs(valCosto)}</span></div>
+  <div class="tarjeta"><span class="tarjeta-etiqueta">Stock valorizado a venta</span><span class="tarjeta-monto">${gs(valVenta)}</span></div>
+  <div class="tarjeta tarjeta-verde"><span class="tarjeta-etiqueta">Ganancia potencial</span><span class="tarjeta-monto">${gs(valVenta - valCosto)}</span></div>
+</section>
+${sinCosto ? `<p class="ayuda-texto">⚠️ ${sinCosto} producto(s) sin precio de costo cargado: la ganancia de esos productos no se puede calcular.</p>` : ''}`;
+  }
 
   return c.html(layout(c, { title: 'Stock · Tercer Tiempo', body: `
 <div class="cabecera-con-boton"><h1 class="titulo-pagina">Stock / Inventario</h1>${botones}</div>
+${valorizacion}
 <div class="tabla-envoltorio"><table class="tabla">
-  <thead><tr><th>Producto</th><th>Categoría</th><th>Precio venta</th><th>Stock</th><th>Mínimo</th>${thAcc}</tr></thead>
+  <thead><tr><th>Producto</th><th>Categoría</th><th>Precio venta</th>${thCosto}<th>Stock</th><th>Mínimo</th>${thAcc}</tr></thead>
   <tbody>${filas}</tbody>
 </table></div>` }));
 });
@@ -728,22 +1150,13 @@ function formProducto(c, producto) {
   <div class="formulario-fila">
     <div><label for="precio_venta">Precio de venta (₲)</label>
       <input type="text" inputmode="numeric" id="precio_venta" name="precio_venta" value="${producto ? producto.precio_venta : ''}" required></div>
-    <div><label for="precio_costo">Precio de costo (₲, opcional)</label>
+    <div><label for="precio_costo">Precio de costo (₲)</label>
       <input type="text" inputmode="numeric" id="precio_costo" name="precio_costo" value="${producto ? (producto.precio_costo ?? '') : ''}"></div>
   </div>
+  <p class="ayuda-texto">Cargá el precio de costo para que el sistema calcule el margen y la ganancia real de cada venta.</p>
   ${!editar ? `<label for="stock">Stock inicial</label><input type="number" id="stock" name="stock" value="0" min="0">` : ''}
   <label for="stock_minimo">Stock mínimo (para alertas)</label>
   <input type="number" id="stock_minimo" name="stock_minimo" value="${producto ? producto.stock_minimo : 5}" min="0">
-
-  <h2 class="titulo-seccion" style="margin-bottom:4px">Promo por cantidad (opcional)</h2>
-  <p class="ayuda-texto">Ej: 3 unidades por 20.000. El sistema cobra la promo y descuenta las unidades reales del stock. Dejá en 0 si no hay promo.</p>
-  <div class="formulario-fila">
-    <div><label for="cantidad_promo">Cantidad para promo</label>
-      <input type="number" id="cantidad_promo" name="cantidad_promo" min="0" value="${producto ? (producto.cantidad_promo || 0) : 0}"></div>
-    <div><label for="precio_promo">Precio de esa cantidad (₲)</label>
-      <input type="text" inputmode="numeric" id="precio_promo" name="precio_promo" value="${producto ? (producto.precio_promo || 0) : 0}"></div>
-  </div>
-
   <button type="submit" class="btn btn-primario btn-grande">Guardar</button>
 </form>` });
 }
@@ -754,8 +1167,8 @@ app.post('/stock/nuevo', requiereLogin, requiereAdmin, async (c) => {
   const b = await c.req.parseBody();
   let cat = String(b.categoria || 'otro');
   if (!CATEGORIAS_PRODUCTO.includes(cat)) cat = 'otro';
-  await run(c.env, 'INSERT INTO productos (nombre, categoria, precio_venta, precio_costo, stock, stock_minimo, cantidad_promo, precio_promo) VALUES (?,?,?,?,?,?,?,?)',
-    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock), aEntero(b.stock_minimo ?? 5), aEntero(b.cantidad_promo), aEntero(b.precio_promo));
+  await run(c.env, 'INSERT INTO productos (nombre, categoria, precio_venta, precio_costo, stock, stock_minimo) VALUES (?,?,?,?,?,?)',
+    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock), aEntero(b.stock_minimo ?? 5));
   addFlash(c, 'exito', 'Producto creado correctamente.');
   return irA(c, '/stock');
 });
@@ -774,8 +1187,8 @@ app.post('/stock/:id/editar', requiereLogin, requiereAdmin, async (c) => {
   const b = await c.req.parseBody();
   let cat = String(b.categoria || 'otro');
   if (!CATEGORIAS_PRODUCTO.includes(cat)) cat = 'otro';
-  await run(c.env, 'UPDATE productos SET nombre=?, categoria=?, precio_venta=?, precio_costo=?, stock_minimo=?, cantidad_promo=?, precio_promo=? WHERE id=?',
-    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock_minimo ?? 5), aEntero(b.cantidad_promo), aEntero(b.precio_promo), id);
+  await run(c.env, 'UPDATE productos SET nombre=?, categoria=?, precio_venta=?, precio_costo=?, stock_minimo=? WHERE id=?',
+    String(b.nombre || '').trim(), cat, aEntero(b.precio_venta), aEntero(b.precio_costo), aEntero(b.stock_minimo ?? 5), id);
   addFlash(c, 'exito', 'Producto actualizado correctamente.');
   return irA(c, '/stock');
 });
@@ -834,16 +1247,16 @@ app.get('/reportes', requiereLogin, requiereAdmin, async (c) => {
   const totalAlq = await totalAlquileresDia(c.env, fecha);
   const totalKio = await totalKioscoDia(c.env, fecha);
   const totalGen = totalAlq + totalKio;
-  const met = await totalesPorMetodoDia(c.env, fecha);
   const porTipo = await alquileresPorTipoDia(c.env, fecha);
   const top = await productosMasVendidosDia(c.env, fecha);
+  const uk = await utilidadKioscoDia(c.env, fecha);
   const [ini, fin] = rangoDia(fecha);
   const caja = await first(c.env, 'SELECT * FROM cajas WHERE fecha_apertura>=? AND fecha_apertura<=? ORDER BY id DESC LIMIT 1', ini, fin);
 
   const filasTipo = porTipo.length ? porTipo.map((r) => `<tr><td>${esc(ETIQUETAS_ESPACIO[r.tipo_espacio] || r.tipo_espacio)}</td><td>${r.cantidad}</td><td>${gs(r.total)}</td></tr>`).join('')
     : `<tr><td colspan="3" class="tabla-vacia">Sin alquileres en esta fecha.</td></tr>`;
-  const filasTop = top.length ? top.map((r) => `<tr><td>${esc(r.nombre)}</td><td>${r.cantidad}</td><td>${gs(r.total)}</td></tr>`).join('')
-    : `<tr><td colspan="3" class="tabla-vacia">Sin ventas de kiosco en esta fecha.</td></tr>`;
+  const filasTop = top.length ? top.map((r) => `<tr><td>${esc(r.nombre)}</td><td>${r.cantidad}</td><td>${gs(r.total)}</td><td>${gs(r.costo)}</td><td class="texto-verde">${gs(r.total - r.costo)}</td></tr>`).join('')
+    : `<tr><td colspan="5" class="tabla-vacia">Sin ventas de kiosco en esta fecha.</td></tr>`;
   const bloqueCaja = (caja && caja.estado === 'cerrada') ? `
 <div class="panel panel-resumen">
   <div class="resumen-fila"><span>Monto inicial</span><strong>${gs(caja.monto_inicial)}</strong></div>
@@ -869,16 +1282,16 @@ app.get('/reportes', requiereLogin, requiereAdmin, async (c) => {
   <div class="tarjeta"><span class="tarjeta-etiqueta">Alquileres</span><span class="tarjeta-monto">${gs(totalAlq)}</span></div>
   <div class="tarjeta"><span class="tarjeta-etiqueta">Kiosco</span><span class="tarjeta-monto">${gs(totalKio)}</span></div>
 </section>
-<h2 class="titulo-seccion">Cobrado por método de pago</h2>
-<section class="tarjetas-resumen">
-  <div class="tarjeta"><span class="tarjeta-etiqueta">💵 Efectivo</span><span class="tarjeta-monto">${gs(met.ef)}</span></div>
-  <div class="tarjeta"><span class="tarjeta-etiqueta">🏦 Transferencia</span><span class="tarjeta-monto">${gs(met.tr)}</span></div>
-  <div class="tarjeta"><span class="tarjeta-etiqueta">💳 Tarjeta</span><span class="tarjeta-monto">${gs(met.ta)}</span></div>
-</section>
+<h2 class="titulo-seccion">Ganancia del kiosco</h2>
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Venta de productos</span><strong>${gs(uk.venta)}</strong></div>
+  <div class="resumen-fila"><span>Costo de la mercadería vendida</span><strong class="texto-rojo">${gs(-uk.costo)}</strong></div>
+  <div class="resumen-fila resumen-total"><span>Ganancia bruta</span><strong class="texto-verde">${gs(uk.utilidad)}</strong></div>
+</div>
 <h2 class="titulo-seccion">Alquileres por tipo de espacio</h2>
 <div class="tabla-envoltorio"><table class="tabla"><thead><tr><th>Tipo</th><th>Cantidad</th><th>Total</th></tr></thead><tbody>${filasTipo}</tbody></table></div>
 <h2 class="titulo-seccion">Productos más vendidos</h2>
-<div class="tabla-envoltorio"><table class="tabla"><thead><tr><th>Producto</th><th>Cantidad</th><th>Total</th></tr></thead><tbody>${filasTop}</tbody></table></div>
+<div class="tabla-envoltorio"><table class="tabla"><thead><tr><th>Producto</th><th>Cantidad</th><th>Venta</th><th>Costo</th><th>Ganancia</th></tr></thead><tbody>${filasTop}</tbody></table></div>
 <h2 class="titulo-seccion">Cierre de caja</h2>
 ${bloqueCaja}` }));
 });
@@ -890,6 +1303,7 @@ app.get('/reportes/rango', requiereLogin, requiereAdmin, async (c) => {
   const ff = parsearFecha(c.req.query('fecha_fin'), hoy);
   const [totalAlq, totalKio] = await totalesRango(c.env, fi, ff);
   const totalGen = totalAlq + totalKio;
+  const uk = await utilidadKioscoRango(c.env, fi, ff);
   return c.html(layout(c, { title: 'Reporte por rango · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Reporte por rango de fechas</h1>
 <form method="get" class="formulario-filtro">
@@ -903,6 +1317,11 @@ app.get('/reportes/rango', requiereLogin, requiereAdmin, async (c) => {
   <div class="tarjeta"><span class="tarjeta-etiqueta">Alquileres</span><span class="tarjeta-monto">${gs(totalAlq)}</span></div>
   <div class="tarjeta"><span class="tarjeta-etiqueta">Kiosco</span><span class="tarjeta-monto">${gs(totalKio)}</span></div>
 </section>
+<div class="panel panel-resumen">
+  <div class="resumen-fila"><span>Venta de productos</span><strong>${gs(uk.venta)}</strong></div>
+  <div class="resumen-fila"><span>Costo de la mercadería vendida</span><strong class="texto-rojo">${gs(-uk.costo)}</strong></div>
+  <div class="resumen-fila resumen-total"><span>Ganancia bruta del kiosco</span><strong class="texto-verde">${gs(uk.utilidad)}</strong></div>
+</div>
 <p class="ayuda-texto">Del ${fmtFecha(fi)} al ${fmtFecha(ff)}</p>` }));
 });
 
@@ -912,7 +1331,7 @@ app.get('/reportes/exportar', requiereLogin, requiereAdmin, async (c) => {
   const totalKio = await totalKioscoDia(c.env, fecha);
   const porTipo = await alquileresPorTipoDia(c.env, fecha);
   const top = await productosMasVendidosDia(c.env, fecha, 100);
-  const met = await totalesPorMetodoDia(c.env, fecha);
+  const uk = await utilidadKioscoDia(c.env, fecha);
   const q = (v) => {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -924,20 +1343,16 @@ app.get('/reportes/exportar', requiereLogin, requiereAdmin, async (c) => {
   lineas.push(['Alquileres', totalAlq].map(q).join(','));
   lineas.push(['Kiosco', totalKio].map(q).join(','));
   lineas.push(['Total general', totalAlq + totalKio].map(q).join(','));
-  lineas.push('');
-  lineas.push(q('Cobrado por método de pago'));
-  lineas.push(['Método', 'Total (Gs.)'].map(q).join(','));
-  lineas.push(['Efectivo', met.ef].map(q).join(','));
-  lineas.push(['Transferencia', met.tr].map(q).join(','));
-  lineas.push(['Tarjeta', met.ta].map(q).join(','));
+  lineas.push(['Costo mercaderia vendida', uk.costo].map(q).join(','));
+  lineas.push(['Ganancia bruta kiosco', uk.utilidad].map(q).join(','));
   lineas.push('');
   lineas.push(q('Alquileres por tipo de espacio'));
   lineas.push(['Tipo', 'Cantidad', 'Total (Gs.)'].map(q).join(','));
   for (const r of porTipo) lineas.push([ETIQUETAS_ESPACIO[r.tipo_espacio] || r.tipo_espacio, r.cantidad, r.total].map(q).join(','));
   lineas.push('');
   lineas.push(q('Productos más vendidos'));
-  lineas.push(['Producto', 'Cantidad', 'Total (Gs.)'].map(q).join(','));
-  for (const r of top) lineas.push([r.nombre, r.cantidad, r.total].map(q).join(','));
+  lineas.push(['Producto', 'Cantidad', 'Venta (Gs.)', 'Costo (Gs.)', 'Ganancia (Gs.)'].map(q).join(','));
+  for (const r of top) lineas.push([r.nombre, r.cantidad, r.total, r.costo, r.total - r.costo].map(q).join(','));
   const csv = '﻿' + lineas.join('\r\n');
   return new Response(csv, {
     headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename=reporte_${fecha}.csv` },
@@ -947,15 +1362,27 @@ app.get('/reportes/exportar', requiereLogin, requiereAdmin, async (c) => {
 // -------------------- CONFIGURACION --------------------
 app.get('/configuracion', requiereLogin, requiereAdmin, async (c) => {
   c.set('seccion', 'configuracion');
-  const rows = await all(c.env, 'SELECT tipo_espacio, precio_hora FROM precios_espacio');
-  const precios = {};
-  for (const r of rows) precios[r.tipo_espacio] = r.precio_hora;
-  const campos = TIPOS_ESPACIO.map((t) => `
-  <label for="precio_${t}">${esc(ETIQUETAS_ESPACIO[t])} (₲ por hora)</label>
-  <input type="text" inputmode="numeric" id="precio_${t}" name="precio_${t}" value="${precios[t] ?? 0}">`).join('');
+  const rows = await all(c.env, 'SELECT tipo_espacio, precio_hora, unidad FROM precios_espacio');
+  const precios = {}, unidades = {};
+  for (const r of rows) {
+    precios[r.tipo_espacio] = r.precio_hora;
+    unidades[r.tipo_espacio] = UNIDADES.includes(r.unidad) ? r.unidad : (UNIDAD_DEFECTO[r.tipo_espacio] || 'hora');
+  }
+  const campos = TIPOS_ESPACIO.map((t) => {
+    const u = unidades[t] || UNIDAD_DEFECTO[t] || 'hora';
+    const opts = UNIDADES.map((v) => `<option value="${v}" ${v === u ? 'selected' : ''}>${esc(ETIQUETAS_UNIDAD[v])}</option>`).join('');
+    return `
+  <div class="formulario-fila">
+    <div><label for="precio_${t}">${esc(ETIQUETAS_ESPACIO[t])} (₲ por ${UNIDAD_SINGULAR[u]})</label>
+      <input type="text" inputmode="numeric" id="precio_${t}" name="precio_${t}" value="${precios[t] ?? 0}"></div>
+    <div><label for="unidad_${t}">Se cobra</label>
+      <select id="unidad_${t}" name="unidad_${t}">${opts}</select></div>
+  </div>`;
+  }).join('');
   return c.html(layout(c, { title: 'Configuración · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Configuración</h1>
-<h2 class="titulo-seccion">Precios por hora</h2>
+<h2 class="titulo-seccion">Precios de los espacios</h2>
+<p class="ayuda-texto">Cada espacio se puede cobrar por hora, por juego o por ficha. El billar se cobra por ficha y el vóley/piki por juego.</p>
 <form method="post" action="/configuracion/precios" class="formulario formulario-tarjeta">
   ${campos}
   <button type="submit" class="btn btn-primario btn-grande">Guardar precios</button>
@@ -969,7 +1396,9 @@ app.post('/configuracion/precios', requiereLogin, requiereAdmin, async (c) => {
   for (const t of TIPOS_ESPACIO) {
     const existe = await first(c.env, 'SELECT id FROM precios_espacio WHERE tipo_espacio=?', t);
     if (!existe) continue;
-    await run(c.env, 'UPDATE precios_espacio SET precio_hora=? WHERE tipo_espacio=?', aEntero(b[`precio_${t}`]), t);
+    let u = String(b[`unidad_${t}`] || '');
+    if (!UNIDADES.includes(u)) u = UNIDAD_DEFECTO[t] || 'hora';
+    await run(c.env, 'UPDATE precios_espacio SET precio_hora=?, unidad=? WHERE tipo_espacio=?', aEntero(b[`precio_${t}`]), u, t);
   }
   addFlash(c, 'exito', 'Precios actualizados correctamente.');
   return irA(c, '/configuracion');
@@ -1241,6 +1670,11 @@ a { color: var(--verde); text-decoration: none; }
 .subtitulo-pagina { margin: 0 0 16px; color: var(--texto-secundario); }
 .titulo-seccion { margin: 28px 0 12px; font-size: 1.2rem; color: var(--texto); }
 .ayuda-texto { color: var(--texto-secundario); font-size: 0.9rem; }
+.texto-suave { color: var(--texto-secundario); font-weight: 400; }
+.panel-mixto { border: 1px solid var(--borde); border-radius: 10px; padding: 0.75rem 0.9rem 0.25rem; margin: 0.5rem 0 0.75rem; background: rgba(0,0,0,0.02); }
+.panel-mixto .formulario-fila { gap: 0.6rem; }
+.panel-mixto label { font-size: 0.85rem; }
+.panel-mixto .ayuda-texto { margin: 0.35rem 0 0.5rem; font-weight: 600; }
 .link-secundario { display: inline-block; margin-top: 14px; font-weight: 600; }
 
 .cabecera-con-boton {
@@ -1381,6 +1815,9 @@ a { color: var(--verde); text-decoration: none; }
 }
 .panel-verde { border-left: 5px solid var(--verde); }
 .panel-gris { border-left: 5px solid var(--borde); }
+.panel-naranja { border-left: 5px solid var(--naranja, #e07b39); }
+.aviso-arqueo { margin: 0.75rem 0 1rem; }
+.aviso-arqueo .btn { margin-top: 0.4rem; }
 .panel-resumen { max-width: 520px; }
 .resumen-fila {
   display: flex;
@@ -1418,6 +1855,7 @@ a { color: var(--verde); text-decoration: none; }
 .etiqueta-verde { background: var(--verde-claro); color: var(--verde-oscuro); }
 .etiqueta-naranja { background: var(--naranja-claro); color: var(--naranja-oscuro); }
 .etiqueta-gris { background: #eceeed; color: var(--texto-secundario); }
+.etiqueta-roja { background: var(--rojo-claro); color: var(--rojo); }
 
 /* ---------- Kiosco: grilla de productos ---------- */
 .grilla-productos {
@@ -1438,7 +1876,6 @@ a { color: var(--verde); text-decoration: none; }
 .producto-sin-stock { opacity: 0.5; }
 .producto-nombre { font-weight: 700; font-size: 0.95rem; min-height: 40px; }
 .producto-precio { color: var(--verde-oscuro); font-weight: 700; }
-.producto-promo { align-self: flex-start; background: var(--naranja-claro); color: var(--naranja-oscuro); font-size: 0.75rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
 .producto-stock { font-size: 0.78rem; color: var(--texto-secundario); }
 .stepper { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
 .stepper-btn {
@@ -1502,37 +1939,67 @@ document.addEventListener("DOMContentLoaded", () => {
     setTimeout(() => { flash.style.display = "none"; }, 6000);
   });
 
+  // ---- Cobro mixto: mostrar los montos y avisar si no cuadra ----
+  var totalParaMixto = 0;
+  const selMetodoPago = document.getElementById("metodo_pago");
+  const bloqueMixto = document.getElementById("bloque-mixto");
+  const avisoMixto = document.getElementById("mixto-aviso");
+  const inputsMixto = Array.prototype.slice.call(document.querySelectorAll(".mixto-input"));
+
+  function refrescarMixto() {
+    if (!selMetodoPago || !bloqueMixto) return;
+    const esMixto = selMetodoPago.value === "mixto";
+    bloqueMixto.style.display = esMixto ? "block" : "none";
+    if (!esMixto) { if (avisoMixto) avisoMixto.textContent = ""; return; }
+    let suma = 0;
+    inputsMixto.forEach((i) => { suma += parseInt(String(i.value).replace(/[^0-9]/g, ""), 10) || 0; });
+    if (!avisoMixto) return;
+    const dif = totalParaMixto - suma;
+    if (totalParaMixto <= 0) avisoMixto.textContent = "Cargá primero lo que se cobra.";
+    else if (dif === 0) avisoMixto.textContent = "✅ El reparto cuadra con el total.";
+    else if (dif > 0) avisoMixto.textContent = "Falta repartir " + formatearGuaranies(dif);
+    else avisoMixto.textContent = "Te pasaste por " + formatearGuaranies(-dif);
+  }
+
+  window.avisarTotalMixto = function (t) { totalParaMixto = t; refrescarMixto(); };
+  if (selMetodoPago) selMetodoPago.addEventListener("change", refrescarMixto);
+  inputsMixto.forEach((campo) => campo.addEventListener("input", () => {
+    // Con dos formas de pago, lo que no es efectivo es transferencia: se completa solo
+    if (totalParaMixto > 0 && inputsMixto.length === 2) {
+      const otro = inputsMixto[0] === campo ? inputsMixto[1] : inputsMixto[0];
+      const cargado = parseInt(String(campo.value).replace(/[^0-9]/g, ""), 10) || 0;
+      otro.value = String(Math.max(0, totalParaMixto - cargado));
+    }
+    refrescarMixto();
+  }));
+  refrescarMixto();
+
   // ---- Total en vivo de alquiler ----
   const selectEspacio = document.getElementById("tipo_espacio");
   const inputDuracion = document.getElementById("duracion_horas");
+  const labelCantidad = document.getElementById("label-cantidad");
   const totalSpanAlq = document.getElementById("total-alquiler");
   if (selectEspacio && inputDuracion && totalSpanAlq) {
-    const metodo = document.getElementById("metodo_pago");
-    const campoMixto = document.querySelector(".campo-mixto");
-    const inputEf = document.getElementById("monto_efectivo");
-    const resto = document.querySelector(".resto-transferencia");
-    let totalNum = 0;
-    const actualizarMixto = () => {
-      if (!metodo) return;
-      const esMixto = metodo.value === "mixto";
-      if (campoMixto) campoMixto.style.display = esMixto ? "block" : "none";
-      if (esMixto && inputEf && resto) {
-        const ef = Math.min(parseInt((inputEf.value || "0").replace(/\\D/g, ""), 10) || 0, totalNum);
-        resto.textContent = "Resto por transferencia: " + formatearGuaranies(totalNum - ef);
-      }
-    };
+    const textos = { hora: "Cantidad de horas", juego: "Cantidad de juegos", ficha: "Cantidad de fichas" };
     const actualizar = () => {
       const opcion = selectEspacio.options[selectEspacio.selectedIndex];
       const precio = parseFloat(opcion.dataset.precio || "0");
-      const horas = parseFloat(inputDuracion.value || "0");
-      totalNum = Math.round(precio * horas);
-      totalSpanAlq.textContent = formatearGuaranies(totalNum);
-      actualizarMixto();
+      const unidad = opcion.dataset.unidad || "hora";
+      if (labelCantidad) labelCantidad.textContent = textos[unidad] || "Cantidad";
+      // Solo las horas admiten medias horas; juegos y fichas van de a uno
+      if (unidad === "hora") {
+        inputDuracion.min = "0.5"; inputDuracion.step = "0.5";
+      } else {
+        inputDuracion.min = "1"; inputDuracion.step = "1";
+        inputDuracion.value = String(Math.max(1, Math.round(parseFloat(inputDuracion.value || "1"))));
+      }
+      const cantidad = parseFloat(inputDuracion.value || "0");
+      const totalAlq = Math.round(precio * cantidad);
+      totalSpanAlq.textContent = formatearGuaranies(totalAlq);
+      if (window.avisarTotalMixto) window.avisarTotalMixto(totalAlq);
     };
     selectEspacio.addEventListener("change", actualizar);
     inputDuracion.addEventListener("input", actualizar);
-    if (metodo) metodo.addEventListener("change", actualizarMixto);
-    if (inputEf) inputEf.addEventListener("input", actualizarMixto);
     actualizar();
   }
 
@@ -1542,7 +2009,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (inputContado && previewDif && inputContado.dataset.esperado !== undefined) {
     const montoEsperado = parseInt(inputContado.dataset.esperado, 10) || 0;
     inputContado.addEventListener("input", () => {
-      const valor = parseInt(inputContado.value.replace(/\\D/g, ""), 10) || 0;
+      const valor = parseInt(inputContado.value.replace(/\D/g, ""), 10) || 0;
       const diferencia = valor - montoEsperado;
       if (!inputContado.value) { previewDif.textContent = ""; return; }
       if (diferencia === 0) {
@@ -1558,40 +2025,16 @@ document.addEventListener("DOMContentLoaded", () => {
 `;
 const JS_KIOSCO = `document.addEventListener("DOMContentLoaded", () => {
   const totalSpan = document.getElementById("total-venta");
-  const metodo = document.getElementById("metodo_pago");
-  const campoMixto = document.querySelector(".campo-mixto");
-  const inputEf = document.getElementById("monto_efectivo");
-  const resto = document.querySelector(".resto-transferencia");
-  let totalNum = 0;
-
-  function actualizarMixto() {
-    if (!metodo) return;
-    const esMixto = metodo.value === "mixto";
-    if (campoMixto) campoMixto.style.display = esMixto ? "block" : "none";
-    if (esMixto && inputEf && resto) {
-      const ef = Math.min(parseInt((inputEf.value || "0").replace(/\\D/g, ""), 10) || 0, totalNum);
-      resto.textContent = "Resto por transferencia: " + formatearGuaranies(totalNum - ef);
-    }
-  }
 
   function actualizarTotalVenta() {
     let total = 0;
     document.querySelectorAll(".stepper-input").forEach((input) => {
       const precio = parseFloat(input.dataset.precio || "0");
       const cantidad = parseInt(input.value || "0", 10);
-      const cp = parseInt(input.dataset.cantpromo || "0", 10);
-      const pp = parseFloat(input.dataset.preciopromo || "0");
-      if (cp > 1 && pp > 0) {
-        const grupos = Math.floor(cantidad / cp);
-        const resto = cantidad % cp;
-        total += grupos * pp + resto * precio;
-      } else {
-        total += precio * cantidad;
-      }
+      total += precio * cantidad;
     });
-    totalNum = total;
     if (totalSpan) totalSpan.textContent = formatearGuaranies(total);
-    actualizarMixto();
+    if (window.avisarTotalMixto) window.avisarTotalMixto(total);
   }
 
   document.querySelectorAll(".stepper-btn").forEach((boton) => {
@@ -1609,8 +2052,6 @@ const JS_KIOSCO = `document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  if (metodo) metodo.addEventListener("change", actualizarMixto);
-  if (inputEf) inputEf.addEventListener("input", actualizarMixto);
   actualizarTotalVenta();
 });
 `;
@@ -1621,4 +2062,13 @@ app.get('/static/js/kiosco.js', (c) => c.body(JS_KIOSCO, 200, { 'Content-Type': 
 // 404
 app.notFound((c) => c.html(paginaError(404, 'Página no encontrada.'), 404));
 
-export default app;
+// El cron corre a las 08:00 UTC = 05:00 de Paraguay (UTC-3 fijo, sin horario de
+// invierno desde 2024), tres horas despues de la noche mas larga del complejo.
+export default {
+  fetch: app.fetch,
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(cierreAutomaticoDeCajas(env).then((ids) => {
+      console.log(ids.length ? 'Cierre automatico de cajas: ' + ids.join(', ') : 'Cierre automatico: no habia cajas abiertas.');
+    }));
+  },
+};
