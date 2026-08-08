@@ -163,6 +163,10 @@ async function totalesRango(env, fi, ff) {
 // ---- Arqueo de caja: los totales se calculan POR CAJA (no por dia) ----
 const COSTO_SQL = 'COALESCE(NULLIF(vd.costo_unitario,0), p.precio_costo, 0)';
 
+// Version de los archivos estaticos. Se completa mas abajo, cuando ya estan
+// definidos el CSS y los scripts, con un hash de su propio contenido.
+const VER = { css: '0', main: '0', kiosco: '0' };
+
 // Precio de N unidades aplicando promo por cantidad (ej: 3 x 20.000).
 // Los grupos completos van al precio de promo y el resto al precio normal.
 function precioItem(producto, cantidad) {
@@ -382,11 +386,11 @@ function layout(c, { title, body, publico = false }) {
     return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)}</title>
-<link rel="stylesheet" href="/static/css/style.css"></head>
+<link rel="stylesheet" href="/static/css/style.css?v=${VER.css}"></head>
 <body class="pagina-login">
 ${bloqueFlashes('flashes-login')}
 ${body}
-<script src="/static/js/main.js"></script></body></html>`;
+<script src="/static/js/main.js?v=${VER.main}"></script></body></html>`;
   }
 
   const navItem = (href, bp, actualBp, txt) => `<a href="${href}" class="${bp === actualBp ? 'activo' : ''}">${txt}</a>`;
@@ -395,7 +399,7 @@ ${body}
   return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${esc(title)}</title>
-<link rel="stylesheet" href="/static/css/style.css"></head>
+<link rel="stylesheet" href="/static/css/style.css?v=${VER.css}"></head>
 <body>
 <div class="app-shell">
   <button id="btn-menu" class="btn-menu" aria-label="Abrir menú">☰</button>
@@ -422,7 +426,7 @@ ${body}
     ${body}
   </main>
 </div>
-<script src="/static/js/main.js"></script>
+<script src="/static/js/main.js?v=${VER.main}"></script>
 ${c.get('extraScript') || ''}
 </body></html>`;
 }
@@ -447,7 +451,7 @@ function irA(c, path) {
 
 function paginaError(codigo, mensaje) {
   return `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Error ${codigo}</title>
-<link rel="stylesheet" href="/static/css/style.css"></head><body class="pagina-login">
+<link rel="stylesheet" href="/static/css/style.css?v=${VER.css}"></head><body class="pagina-login">
 <div class="login-envoltorio"><div class="login-card" style="text-align:center">
 <h1 style="color:#145c2e">Error ${codigo}</h1><p>${esc(mensaje || 'No tenés permiso para acceder a esta página.')}</p>
 <a href="/dashboard" class="btn btn-primario btn-grande">Volver al inicio</a></div></div></body></html>`;
@@ -1018,7 +1022,7 @@ app.get('/kiosco', requiereLogin, async (c) => {
   }
   if (abierto) html += '</div>';
 
-  c.set('extraScript', '<script src="/static/js/kiosco.js"></script>');
+  c.set('extraScript', '<script src="/static/js/kiosco.js?v=' + VER.kiosco + '"></script>');
   return c.html(layout(c, { title: 'Kiosco · Tercer Tiempo', body: `
 <h1 class="titulo-pagina">Venta de kiosco</h1>
 ${avisoCaja}
@@ -2088,9 +2092,25 @@ const JS_KIOSCO = `document.addEventListener("DOMContentLoaded", () => {
   actualizarTotalVenta();
 });
 `;
-app.get('/static/css/style.css', (c) => c.body(CSS_STYLE, 200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }));
-app.get('/static/js/main.js', (c) => c.body(JS_MAIN, 200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }));
-app.get('/static/js/kiosco.js', (c) => c.body(JS_KIOSCO, 200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=3600' }));
+// Cada archivo estatico se pide con ?v=<hash de su contenido>. Si el CSS o el JS
+// cambian, cambia el hash y el navegador baja la version nueva al instante, en vez
+// de quedarse hasta una hora con la copia vieja en cache.
+function hashContenido(txt) {
+  let h = 2166136261;
+  for (let i = 0; i < txt.length; i++) { h ^= txt.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+Object.assign(VER, {
+  css: hashContenido(CSS_STYLE),
+  main: hashContenido(JS_MAIN),
+  kiosco: hashContenido(JS_KIOSCO),
+});
+
+// Como la URL cambia junto con el contenido, se puede cachear a largo plazo sin riesgo.
+const CACHE_ESTATICO = 'public, max-age=31536000, immutable';
+app.get('/static/css/style.css', (c) => c.body(CSS_STYLE, 200, { 'Content-Type': 'text/css; charset=utf-8', 'Cache-Control': CACHE_ESTATICO }));
+app.get('/static/js/main.js', (c) => c.body(JS_MAIN, 200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': CACHE_ESTATICO }));
+app.get('/static/js/kiosco.js', (c) => c.body(JS_KIOSCO, 200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': CACHE_ESTATICO }));
 
 // 404
 app.notFound((c) => c.html(paginaError(404, 'Página no encontrada.'), 404));
